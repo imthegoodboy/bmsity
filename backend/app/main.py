@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,15 @@ from .schemas import (
 from .settings import settings
 
 
-app = FastAPI(title="BmsitAi API")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    settings.report_dir.mkdir(parents=True, exist_ok=True)
+    yield
+
+
+app = FastAPI(title="BmsitAi API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,13 +58,6 @@ def new_id(prefix: str) -> str:
 def clean_filename(name: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(name).name).strip("._")
     return safe or "answer-sheet"
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
-    settings.upload_dir.mkdir(parents=True, exist_ok=True)
-    settings.report_dir.mkdir(parents=True, exist_ok=True)
 
 
 @app.get("/health")
