@@ -13,7 +13,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadF
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from .ai import evaluate_submission_with_openai, ensure_openai_ready
+from .ai import evaluate_submission_with_openai, extract_schema_with_openai, ensure_openai_ready
 from .database import get_db, init_db, json_loads, row_to_dict, rows_to_dicts
 from .reports import generate_report
 from .schemas import (
@@ -90,8 +90,7 @@ def _get_exam_or_404(exam_id: str) -> dict[str, Any]:
     return row
 
 
-@app.post("/exams", response_model=ExamOut)
-def create_exam(payload: ExamCreate) -> ExamOut:
+def _insert_exam(payload: ExamCreate) -> ExamOut:
     exam_id = new_id("exam")
     created_at = now_iso()
     questions = [question.model_dump() for question in payload.questions]
@@ -120,6 +119,79 @@ def create_exam(payload: ExamCreate) -> ExamOut:
         questions=questions,
         created_at=created_at,
     )
+
+
+@app.post("/exams", response_model=ExamOut)
+def create_exam(payload: ExamCreate) -> ExamOut:
+    return _insert_exam(payload)
+
+
+@app.post("/schema/extract", response_model=ExamOut)
+async def create_exam_from_schema_image(
+    subject: str = Form("General"),
+    title: str = Form("Answer Schema"),
+    default_marks: float = Form(10),
+    file: UploadFile = File(...),
+) -> ExamOut:
+    try:
+        ensure_openai_ready()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if default_marks <= 0:
+        raise HTTPException(status_code=422, detail="Marks must be greater than zero.")
+
+    schema_root = settings.upload_dir / "_schemas"
+    schema_root.mkdir(parents=True, exist_ok=True)
+    original = clean_filename(file.filename or "answer-schema")
+    stored_path = schema_root / f"{uuid.uuid4().hex[:12]}_{original}"
+    with stored_path.open("wb") as file_handle:
+        shutil.copyfileobj(file.file, file_handle)
+
+    try:
+        extracted = extract_schema_with_openai(
+            file_path=stored_path,
+            subject=subject.strip() or "General",
+            title=title.strip() or "Answer Schema",
+            default_marks=float(default_marks),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    questions: list[dict[str, Any]] = []
+    for index, question in enumerate(extracted.get("questions", []), start=1):
+        text = str(question.get("text", "")).strip()
+        model_answer = str(question.get("model_answer", "")).strip()
+        if not text or not model_answer:
+            continue
+        max_marks = question.get("max_marks") or default_marks
+        questions.append(
+            {
+                "id": str(question.get("id") or f"Q{index}").strip() or f"Q{index}",
+                "text": text,
+                "max_marks": max(0.5, float(max_marks)),
+                "model_answer": model_answer,
+                "marking_rules": str(question.get("marking_rules", "")).strip(),
+                "keywords": [
+                    str(keyword).strip()
+                    for keyword in question.get("keywords", [])
+                    if str(keyword).strip()
+                ],
+            }
+        )
+
+    if not questions:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not find a question and answer schema in the uploaded image.",
+        )
+
+    payload = ExamCreate(
+        title=str(extracted.get("title") or title or "Answer Schema").strip(),
+        subject=str(extracted.get("subject") or subject or "General").strip(),
+        instructions=str(extracted.get("instructions") or "").strip(),
+        questions=questions,
+    )
+    return _insert_exam(payload)
 
 
 @app.get("/exams", response_model=list[ExamOut])
