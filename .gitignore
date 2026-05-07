@@ -21,3 +21,5 @@ frontend/.next/
 frontend/node_modules/
 
 .env.example
+
+backend\.env.example
