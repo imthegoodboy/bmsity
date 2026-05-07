@@ -1,2 +1,0 @@
-INFO:     127.0.0.1:48580 - "GET /health HTTP/1.1" 200 OK
-INFO:     127.0.0.1:55325 - "GET /exams HTTP/1.1" 200 OK
