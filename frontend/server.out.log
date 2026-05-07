@@ -7,3 +7,6 @@
 - Network:       http://192.168.1.140:3000
 ✓ Ready in 720ms
 
+○ Compiling / ...
+ GET / 200 in 4.9s (next.js: 4.4s, application-code: 442ms)
+[?25h
