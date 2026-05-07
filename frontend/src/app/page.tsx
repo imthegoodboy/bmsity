@@ -267,18 +267,18 @@ export default function Home() {
         </div>
       ) : null}
 
-      <section className="grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
-        <div className="space-y-5">
+      <section className="grid min-w-0 gap-5 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        <div className="min-w-0 space-y-5">
           <form className="panel space-y-4" onSubmit={extractSchema}>
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="text-lg font-bold text-ink">1. Schema Image</h2>
-              <button className="btn-primary" disabled={!schemaFile || busy === "schema"} type="submit">
+              <button className="btn-primary w-full sm:w-auto" disabled={!schemaFile || busy === "schema"} type="submit">
                 <Wand2 size={16} />
                 Extract
               </button>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
+            <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_120px]">
               <label>
                 <span className="label">Subject</span>
                 <input
@@ -322,10 +322,10 @@ export default function Home() {
           </form>
 
           <form className="panel space-y-4" onSubmit={uploadAndEvaluate}>
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="text-lg font-bold text-ink">2. Student Sheet</h2>
               <button
-                className="btn-primary"
+                className="btn-primary w-full sm:w-auto"
                 disabled={!activeExam || !answerFiles.length || !usn.trim() || busy === "evaluate"}
                 type="submit"
               >
@@ -379,7 +379,7 @@ export default function Home() {
           </form>
         </div>
 
-        <div className="space-y-5">
+        <div className="min-w-0 space-y-5">
           <section className="panel space-y-4">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-lg font-bold text-ink">Extracted Schema</h2>
