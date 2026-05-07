@@ -2,6 +2,13 @@
 
 Localhost AI answer sheet evaluation app.
 
+## Flow
+
+1. Upload the teacher answer-schema image.
+2. GPT extracts the question and model answer/rubric.
+3. Enter USN and upload the student answer sheet.
+4. GPT evaluates and generates marks, confidence, feedback, and PDF.
+
 ## Backend
 
 ```powershell
