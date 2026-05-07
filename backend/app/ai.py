@@ -15,6 +15,44 @@ SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 SUPPORTED_FILE_TYPES = {"application/pdf"}
 
 
+SCHEMA_EXTRACTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["title", "subject", "instructions", "questions"],
+    "properties": {
+        "title": {"type": "string"},
+        "subject": {"type": "string"},
+        "instructions": {"type": "string"},
+        "questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "id",
+                    "text",
+                    "max_marks",
+                    "model_answer",
+                    "marking_rules",
+                    "keywords",
+                ],
+                "properties": {
+                    "id": {"type": "string"},
+                    "text": {"type": "string"},
+                    "max_marks": {"type": "number"},
+                    "model_answer": {"type": "string"},
+                    "marking_rules": {"type": "string"},
+                    "keywords": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+            },
+        },
+    },
+}
+
+
 EVALUATION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -94,6 +132,15 @@ def _upload_file_content(client: OpenAI, path: Path) -> dict[str, str]:
     return {"type": "input_file", "file_id": uploaded.id}
 
 
+def _content_for_path(client: OpenAI, path: Path) -> dict[str, str]:
+    mime_type = _mime_type(path)
+    if mime_type in SUPPORTED_IMAGE_TYPES:
+        return _image_content(path, mime_type)
+    if mime_type in SUPPORTED_FILE_TYPES:
+        return _upload_file_content(client, path)
+    raise RuntimeError(f"Unsupported file type for AI processing: {path.name}")
+
+
 def _extract_text(response: Any) -> str:
     output_text = getattr(response, "output_text", None)
     if output_text:
@@ -106,6 +153,63 @@ def _extract_text(response: Any) -> str:
             if text:
                 chunks.append(text)
     return "\n".join(chunks)
+
+
+def extract_schema_with_openai(
+    *,
+    file_path: Path,
+    subject: str,
+    title: str,
+    default_marks: float,
+) -> dict[str, Any]:
+    ensure_openai_ready()
+    client = OpenAI(api_key=settings.openai_api_key)
+
+    prompt = (
+        "Read this teacher answer-schema image. Extract the question or questions and the "
+        "teacher's expected answer/rubric. The schema may contain a short answer, bullet points, "
+        "or components. Preserve the teacher's meaning. If marks are not visible in the image, "
+        f"use {default_marks:g} as the max_marks for each extracted question. "
+        "Return JSON only in the requested schema.\n\n"
+        f"Subject hint: {subject or 'General'}\nTitle hint: {title or 'Uploaded schema'}"
+    )
+
+    response = client.responses.create(
+        model=settings.openai_model,
+        input=[
+            {
+                "role": "system",
+                "content": (
+                    "You turn teacher answer-schema images into clean exam rubrics. "
+                    "Do not evaluate a student here."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    _content_for_path(client, file_path),
+                ],
+            },
+        ],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "bmsitai_schema_extraction",
+                "strict": True,
+                "schema": SCHEMA_EXTRACTION_SCHEMA,
+            }
+        },
+    )
+
+    text = _extract_text(response)
+    if not text:
+        raise RuntimeError("OpenAI returned an empty schema extraction response.")
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("OpenAI returned invalid JSON for the schema extraction.") from exc
 
 
 def evaluate_submission_with_openai(
@@ -138,13 +242,7 @@ def evaluate_submission_with_openai(
 
     content: list[dict[str, str]] = [{"type": "input_text", "text": prompt}]
     for path in file_paths:
-        mime_type = _mime_type(path)
-        if mime_type in SUPPORTED_IMAGE_TYPES:
-            content.append(_image_content(path, mime_type))
-        elif mime_type in SUPPORTED_FILE_TYPES:
-            content.append(_upload_file_content(client, path))
-        else:
-            raise RuntimeError(f"Unsupported file type for AI evaluation: {path.name}")
+        content.append(_content_for_path(client, path))
 
     response = client.responses.create(
         model=settings.openai_model,
