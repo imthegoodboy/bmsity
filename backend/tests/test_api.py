@@ -70,6 +70,41 @@ def test_create_exam_rejects_empty_schema(tmp_path, monkeypatch):
     assert response.status_code == 422
 
 
+def test_schema_image_creates_exam(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+
+    def fake_schema_extractor(**kwargs):
+        return {
+            "title": "Computer Components",
+            "subject": "Computer Science",
+            "instructions": "Use teacher answer points.",
+            "questions": [
+                {
+                    "id": "Q2",
+                    "text": "What is a computer? Explain the components of a computer.",
+                    "max_marks": 10,
+                    "model_answer": "A computer processes data and includes input, output, storage, CPU, ALU, and control unit.",
+                    "marking_rules": "Award partial marks for definition and components.",
+                    "keywords": ["computer", "input", "output", "storage", "CPU", "ALU", "control"],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(main, "extract_schema_with_openai", fake_schema_extractor)
+    response = client.post(
+        "/schema/extract",
+        data={"subject": "Computer Science", "title": "Answer Schema", "default_marks": "10"},
+        files={"file": ("schema.webp", b"fake-schema-image", "image/webp")},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["subject"] == "Computer Science"
+    assert payload["total_marks"] == 10
+    assert payload["questions"][0]["id"] == "Q2"
+    assert "components" in payload["questions"][0]["text"]
+
+
 def test_submission_evaluation_update_and_report(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch)
     exam = create_exam(client)
