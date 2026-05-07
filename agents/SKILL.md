@@ -1,0 +1,5 @@
+- Do not hardcode it; make sure it works using AI.
+- Ensure it works for any type of exam.
+- Ensure the answer matches the teacher's schema, including logic, length, and other key criteria, even if the writing style is different.
+- Make sure it supports multiple users.
+- The teacher will upload the schema, and the agent must evaluate each answer one by one based on that schema.
