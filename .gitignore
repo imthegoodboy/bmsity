@@ -19,3 +19,5 @@ backend/.venv/
 frontend/.env.local
 frontend/.next/
 frontend/node_modules/
+
+.env.example
