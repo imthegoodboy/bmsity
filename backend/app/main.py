@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
+import hmac
 import re
+import secrets
 import shutil
+import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -21,9 +27,13 @@ from .schemas import (
     EvaluationUpdate,
     ExamCreate,
     ExamOut,
+    AuthOut,
+    LoginIn,
+    PasswordChangeIn,
     StartEvaluationOut,
     SubmissionCreated,
     SubmissionOut,
+    StudentPortalOut,
 )
 from .settings import settings
 
@@ -60,6 +70,161 @@ def clean_filename(name: str) -> str:
     return safe or "answer-sheet"
 
 
+def normalize_usn(value: str) -> str:
+    return re.sub(r"\s+", "", value).upper()
+
+
+def _b64_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _b64_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value + padding)
+
+
+def _token_signature(payload: str) -> str:
+    digest = hmac.new(
+        settings.auth_secret.encode("utf-8"),
+        payload.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return _b64_encode(digest)
+
+
+def create_token(*, role: str, subject: str, force_password_change: bool = False) -> str:
+    payload = {
+        "role": role,
+        "sub": subject,
+        "force_password_change": force_password_change,
+        "exp": int(time.time()) + settings.auth_token_ttl_minutes * 60,
+    }
+    encoded = _b64_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    return f"{encoded}.{_token_signature(encoded)}"
+
+
+@dataclass(frozen=True)
+class AuthUser:
+    role: str
+    subject: str
+    force_password_change: bool = False
+
+
+def _decode_token(token: str) -> AuthUser:
+    try:
+        encoded, signature = token.split(".", 1)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid session token.") from exc
+
+    expected = _token_signature(encoded)
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(status_code=401, detail="Invalid session token.")
+
+    try:
+        payload = json.loads(_b64_decode(encoded))
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=401, detail="Invalid session token.") from exc
+
+    if int(payload.get("exp", 0)) < int(time.time()):
+        raise HTTPException(status_code=401, detail="Session expired.")
+
+    role = str(payload.get("role", ""))
+    subject = str(payload.get("sub", ""))
+    if role not in {"teacher", "student"} or not subject:
+        raise HTTPException(status_code=401, detail="Invalid session token.")
+
+    return AuthUser(
+        role=role,
+        subject=subject,
+        force_password_change=bool(payload.get("force_password_change", False)),
+    )
+
+
+def current_user(authorization: str | None = Header(default=None)) -> AuthUser:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Login required.")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Use a bearer session token.")
+    return _decode_token(token)
+
+
+def require_teacher(user: AuthUser = Depends(current_user)) -> AuthUser:
+    if user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Teacher access required.")
+    return user
+
+
+def require_student(user: AuthUser = Depends(current_user)) -> AuthUser:
+    if user.role != "student":
+        raise HTTPException(status_code=403, detail="Student access required.")
+    return user
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    rounds = 260_000
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("ascii"), rounds)
+    return f"pbkdf2_sha256${rounds}${salt}${digest.hex()}"
+
+
+def _verify_password(encoded: str, password: str) -> bool:
+    try:
+        algorithm, rounds_text, salt, expected = encoded.split("$", 3)
+        rounds = int(rounds_text)
+    except ValueError:
+        return False
+    if algorithm != "pbkdf2_sha256":
+        return False
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("ascii"), rounds)
+    return hmac.compare_digest(digest.hex(), expected)
+
+
+def _ensure_student_account(conn: Any, usn: str) -> dict[str, Any] | None:
+    normalized = normalize_usn(usn)
+    if not normalized:
+        return None
+    current = row_to_dict(
+        conn.execute("SELECT * FROM student_accounts WHERE usn = ?", (normalized,)).fetchone()
+    )
+    if current:
+        return current
+    created_at = now_iso()
+    conn.execute(
+        """
+        INSERT INTO student_accounts (usn, password_hash, force_password_change, created_at, updated_at)
+        VALUES (?, '', 1, ?, ?)
+        """,
+        (normalized, created_at, created_at),
+    )
+    return {
+        "usn": normalized,
+        "password_hash": "",
+        "force_password_change": 1,
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+
+
+def _submission_owner_usn(submission_id: str) -> str:
+    with get_db() as conn:
+        row = row_to_dict(conn.execute("SELECT usn FROM submissions WHERE id = ?", (submission_id,)).fetchone())
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found.")
+    return normalize_usn(row["usn"])
+
+
+def require_submission_access(
+    submission_id: str,
+    user: AuthUser = Depends(current_user),
+) -> AuthUser:
+    if user.role == "teacher":
+        return user
+    if user.role == "student" and _submission_owner_usn(submission_id) == user.subject:
+        return user
+    raise HTTPException(status_code=403, detail="You can only access your own results.")
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {
@@ -67,6 +232,144 @@ def health() -> dict[str, Any]:
         "openai_configured": bool(settings.openai_api_key),
         "model": settings.openai_model,
     }
+
+
+@app.post("/auth/teacher/login", response_model=AuthOut)
+def teacher_login(payload: LoginIn) -> AuthOut:
+    if not hmac.compare_digest(payload.identifier.lower(), settings.teacher_email.lower()):
+        raise HTTPException(status_code=401, detail="Invalid teacher credentials.")
+    if not hmac.compare_digest(payload.password, settings.teacher_password):
+        raise HTTPException(status_code=401, detail="Invalid teacher credentials.")
+
+    return AuthOut(
+        token=create_token(role="teacher", subject=settings.teacher_email),
+        role="teacher",
+        display_name="BMSIT&M Teacher",
+        identifier=settings.teacher_email,
+    )
+
+
+@app.post("/auth/student/login", response_model=AuthOut)
+def student_login(payload: LoginIn) -> AuthOut:
+    usn = normalize_usn(payload.identifier)
+    if not usn:
+        raise HTTPException(status_code=422, detail="USN is required.")
+
+    with get_db() as conn:
+        submission = row_to_dict(
+            conn.execute(
+                """
+                SELECT student_name, usn FROM submissions
+                WHERE UPPER(usn) = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (usn,),
+            ).fetchone()
+        )
+        if not submission:
+            raise HTTPException(status_code=401, detail="No published result found for this USN.")
+        account = _ensure_student_account(conn, usn)
+
+    if not account:
+        raise HTTPException(status_code=401, detail="No student account found.")
+
+    if account["password_hash"]:
+        valid_password = _verify_password(account["password_hash"], payload.password)
+    else:
+        valid_password = hmac.compare_digest(normalize_usn(payload.password), usn)
+    if not valid_password:
+        raise HTTPException(status_code=401, detail="Invalid student credentials.")
+
+    force_change = bool(account["force_password_change"])
+    return AuthOut(
+        token=create_token(role="student", subject=usn, force_password_change=force_change),
+        role="student",
+        display_name=submission["student_name"] or usn,
+        identifier=usn,
+        force_password_change=force_change,
+    )
+
+
+@app.get("/auth/me", response_model=AuthOut)
+def auth_me(user: AuthUser = Depends(current_user)) -> AuthOut:
+    if user.role == "teacher":
+        return AuthOut(
+            token=create_token(role="teacher", subject=user.subject),
+            role="teacher",
+            display_name="BMSIT&M Teacher",
+            identifier=user.subject,
+        )
+
+    with get_db() as conn:
+        account = _ensure_student_account(conn, user.subject)
+        submission = row_to_dict(
+            conn.execute(
+                """
+                SELECT student_name FROM submissions
+                WHERE UPPER(usn) = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (user.subject,),
+            ).fetchone()
+        )
+    force_change = bool(account and account["force_password_change"])
+    return AuthOut(
+        token=create_token(role="student", subject=user.subject, force_password_change=force_change),
+        role="student",
+        display_name=(submission or {}).get("student_name") or user.subject,
+        identifier=user.subject,
+        force_password_change=force_change,
+    )
+
+
+@app.post("/auth/student/change-password", response_model=AuthOut)
+def student_change_password(
+    payload: PasswordChangeIn,
+    user: AuthUser = Depends(require_student),
+) -> AuthOut:
+    with get_db() as conn:
+        account = _ensure_student_account(conn, user.subject)
+        submission = row_to_dict(
+            conn.execute(
+                """
+                SELECT student_name FROM submissions
+                WHERE UPPER(usn) = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (user.subject,),
+            ).fetchone()
+        )
+        if not account:
+            raise HTTPException(status_code=404, detail="Student account not found.")
+
+        if account["password_hash"]:
+            current_valid = _verify_password(account["password_hash"], payload.current_password)
+        else:
+            current_valid = hmac.compare_digest(normalize_usn(payload.current_password), user.subject)
+        if not current_valid:
+            raise HTTPException(status_code=401, detail="Current password is incorrect.")
+        if hmac.compare_digest(payload.new_password, user.subject):
+            raise HTTPException(status_code=422, detail="Choose a password different from your USN.")
+
+        conn.execute(
+            """
+            UPDATE student_accounts
+            SET password_hash = ?, force_password_change = 0, updated_at = ?
+            WHERE usn = ?
+            """,
+            (_hash_password(payload.new_password), now_iso(), user.subject),
+        )
+
+    return AuthOut(
+        token=create_token(role="student", subject=user.subject, force_password_change=False),
+        role="student",
+        display_name=(submission or {}).get("student_name") or user.subject,
+        identifier=user.subject,
+        force_password_change=False,
+    )
 
 
 def _exam_from_row(row: dict[str, Any]) -> ExamOut:
@@ -122,7 +425,7 @@ def _insert_exam(payload: ExamCreate) -> ExamOut:
 
 
 @app.post("/exams", response_model=ExamOut)
-def create_exam(payload: ExamCreate) -> ExamOut:
+def create_exam(payload: ExamCreate, _: AuthUser = Depends(require_teacher)) -> ExamOut:
     return _insert_exam(payload)
 
 
@@ -132,6 +435,7 @@ async def create_exam_from_schema_image(
     title: str = Form("Answer Schema"),
     default_marks: float = Form(10),
     file: UploadFile = File(...),
+    _: AuthUser = Depends(require_teacher),
 ) -> ExamOut:
     try:
         ensure_openai_ready()
@@ -195,14 +499,14 @@ async def create_exam_from_schema_image(
 
 
 @app.get("/exams", response_model=list[ExamOut])
-def list_exams() -> list[ExamOut]:
+def list_exams(_: AuthUser = Depends(require_teacher)) -> list[ExamOut]:
     with get_db() as conn:
         rows = rows_to_dicts(conn.execute("SELECT * FROM exams ORDER BY created_at DESC").fetchall())
     return [_exam_from_row(row) for row in rows]
 
 
 @app.get("/exams/{exam_id}", response_model=ExamOut)
-def get_exam(exam_id: str) -> ExamOut:
+def get_exam(exam_id: str, _: AuthUser = Depends(require_teacher)) -> ExamOut:
     exam = _get_exam_or_404(exam_id)
     return _exam_from_row({**exam, "questions_json": json.dumps(exam["questions"])})
 
@@ -213,12 +517,14 @@ async def create_submission(
     student_name: str = Form(...),
     usn: str = Form(""),
     files: list[UploadFile] = File(...),
+    _: AuthUser = Depends(require_teacher),
 ) -> SubmissionCreated:
     _get_exam_or_404(exam_id)
     if not files:
         raise HTTPException(status_code=400, detail="Upload at least one answer sheet file.")
     if not student_name.strip():
         raise HTTPException(status_code=422, detail="Student name is required.")
+    normalized_usn = normalize_usn(usn)
 
     created_at = now_iso()
     submission_id = new_id("sub")
@@ -249,8 +555,9 @@ async def create_submission(
             (id, exam_id, student_name, usn, status, total_marks, created_at, updated_at)
             VALUES (?, ?, ?, ?, 'uploaded', ?, ?, ?)
             """,
-            (submission_id, exam_id, student_name.strip(), usn.strip(), 0, created_at, created_at),
+            (submission_id, exam_id, student_name.strip(), normalized_usn, 0, created_at, created_at),
         )
+        _ensure_student_account(conn, normalized_usn)
         conn.executemany(
             """
             INSERT INTO submission_files
@@ -267,7 +574,7 @@ async def create_submission(
         id=submission_id,
         exam_id=exam_id,
         student_name=student_name.strip(),
-        usn=usn.strip(),
+        usn=normalized_usn,
         status="uploaded",
     )
 
@@ -310,7 +617,7 @@ def _submission_bundle(submission_id: str) -> SubmissionOut:
 
 
 @app.get("/exams/{exam_id}/submissions", response_model=list[SubmissionOut])
-def list_submissions(exam_id: str) -> list[SubmissionOut]:
+def list_submissions(exam_id: str, _: AuthUser = Depends(require_teacher)) -> list[SubmissionOut]:
     _get_exam_or_404(exam_id)
     with get_db() as conn:
         rows = rows_to_dicts(
@@ -322,8 +629,74 @@ def list_submissions(exam_id: str) -> list[SubmissionOut]:
 
 
 @app.get("/submissions/{submission_id}", response_model=SubmissionOut)
-def get_submission(submission_id: str) -> SubmissionOut:
+def get_submission(
+    submission_id: str,
+    _: AuthUser = Depends(require_submission_access),
+) -> SubmissionOut:
     return _submission_bundle(submission_id)
+
+
+@app.get("/students/me", response_model=StudentPortalOut)
+def student_portal(user: AuthUser = Depends(require_student)) -> StudentPortalOut:
+    with get_db() as conn:
+        account = _ensure_student_account(conn, user.subject)
+        rows = rows_to_dicts(
+            conn.execute(
+                """
+                SELECT
+                    s.id AS submission_id,
+                    s.student_name,
+                    s.usn,
+                    e.id AS exam_id,
+                    e.title,
+                    e.subject,
+                    e.total_marks AS exam_total_marks,
+                    e.created_at AS exam_created_at
+                FROM submissions s
+                JOIN exams e ON e.id = s.exam_id
+                WHERE UPPER(s.usn) = ?
+                ORDER BY s.created_at DESC
+                """,
+                (user.subject,),
+            ).fetchall()
+        )
+
+    submissions: list[dict[str, Any]] = []
+    student_name = user.subject
+    for row in rows:
+        bundle = _submission_bundle(row["submission_id"])
+        student_name = bundle.student_name or student_name
+        submissions.append(
+            {
+                "id": bundle.id,
+                "exam": {
+                    "id": row["exam_id"],
+                    "title": row["title"],
+                    "subject": row["subject"],
+                    "total_marks": row["exam_total_marks"],
+                    "created_at": row["exam_created_at"],
+                },
+                "student_name": bundle.student_name,
+                "usn": bundle.usn,
+                "status": bundle.status,
+                "total_score": bundle.total_score,
+                "total_marks": bundle.total_marks,
+                "average_confidence": bundle.average_confidence,
+                "error": bundle.error,
+                "overall_feedback": bundle.overall_feedback,
+                "weak_areas": bundle.weak_areas,
+                "evaluations": bundle.evaluations,
+                "created_at": bundle.created_at,
+                "updated_at": bundle.updated_at,
+            }
+        )
+
+    return StudentPortalOut(
+        student_name=student_name,
+        usn=user.subject,
+        force_password_change=bool(account and account["force_password_change"]),
+        submissions=submissions,
+    )
 
 
 def _clamp(value: float, min_value: float, max_value: float) -> float:
@@ -445,7 +818,11 @@ def _run_evaluation(submission_id: str) -> None:
 
 
 @app.post("/submissions/{submission_id}/evaluate", response_model=StartEvaluationOut)
-def start_evaluation(submission_id: str, background_tasks: BackgroundTasks) -> StartEvaluationOut:
+def start_evaluation(
+    submission_id: str,
+    background_tasks: BackgroundTasks,
+    _: AuthUser = Depends(require_teacher),
+) -> StartEvaluationOut:
     try:
         ensure_openai_ready()
     except RuntimeError as exc:
@@ -476,7 +853,11 @@ def start_evaluation(submission_id: str, background_tasks: BackgroundTasks) -> S
 
 
 @app.patch("/evaluations/{evaluation_id}", response_model=EvaluationOut)
-def update_evaluation(evaluation_id: str, payload: EvaluationUpdate) -> EvaluationOut:
+def update_evaluation(
+    evaluation_id: str,
+    payload: EvaluationUpdate,
+    _: AuthUser = Depends(require_teacher),
+) -> EvaluationOut:
     with get_db() as conn:
         current = row_to_dict(
             conn.execute("SELECT * FROM evaluations WHERE id = ?", (evaluation_id,)).fetchone()
@@ -517,7 +898,10 @@ def update_evaluation(evaluation_id: str, payload: EvaluationUpdate) -> Evaluati
 
 
 @app.get("/submissions/{submission_id}/report")
-def export_report(submission_id: str) -> FileResponse:
+def export_report(
+    submission_id: str,
+    _: AuthUser = Depends(require_submission_access),
+) -> FileResponse:
     submission = _submission_bundle(submission_id)
     if submission.status != "completed":
         raise HTTPException(status_code=400, detail="Complete evaluation before exporting.")

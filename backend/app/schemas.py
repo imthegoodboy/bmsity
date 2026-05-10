@@ -119,3 +119,63 @@ class StartEvaluationOut(BaseModel):
     submission_id: str
     status: str
     message: str
+
+
+class LoginIn(BaseModel):
+    identifier: str = Field(min_length=1, max_length=160)
+    password: str = Field(min_length=1, max_length=256)
+
+    @field_validator("identifier", "password")
+    @classmethod
+    def strip_login_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class AuthOut(BaseModel):
+    token: str
+    role: str
+    display_name: str
+    identifier: str
+    force_password_change: bool = False
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
+    @field_validator("current_password", "new_password")
+    @classmethod
+    def strip_password(cls, value: str) -> str:
+        return value.strip()
+
+
+class StudentExamSummary(BaseModel):
+    id: str
+    title: str
+    subject: str
+    total_marks: float
+    created_at: str
+
+
+class StudentSubmissionOut(BaseModel):
+    id: str
+    exam: StudentExamSummary
+    student_name: str
+    usn: str
+    status: str
+    total_score: float
+    total_marks: float
+    average_confidence: float
+    error: str
+    overall_feedback: str
+    weak_areas: list[str]
+    evaluations: list[EvaluationOut]
+    created_at: str
+    updated_at: str
+
+
+class StudentPortalOut(BaseModel):
+    student_name: str
+    usn: str
+    force_password_change: bool
+    submissions: list[StudentSubmissionOut]
