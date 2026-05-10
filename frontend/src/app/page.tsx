@@ -801,24 +801,35 @@ function Landing({
         <header className="hero-nav">
           <img alt="BMSIT&M logo" className="h-14 w-auto bg-white/95 p-2" src="/brand/bmsit-logo.svg" />
           <div className="hidden items-center gap-6 text-sm font-semibold text-white/80 md:flex">
-            <span>AI evaluation</span>
-            <span>Teacher review</span>
-            <span>Student reports</span>
+            <span>Scheme image</span>
+            <span>Answer sheet</span>
+            <span>Marks report</span>
           </div>
         </header>
 
         <div className="hero-content">
           <p className="eyebrow text-white/80">BMS Institute of Technology & Management</p>
-          <h1>AI-powered answer sheet evaluation for campus exams.</h1>
-          <p className="max-w-2xl text-base font-medium leading-7 text-white/80 sm:text-lg">
-            A role-based portal for teachers to build rubrics, evaluate handwritten answer sheets with GPT vision, review marks, export PDF reports, and publish results to students by USN.
-          </p>
+          <h1>Upload the scheme. Check the sheets. Publish marks.</h1>
+          <div className="hero-flow">
+            <div className="hero-step">
+              <span>1</span>
+              Answer scheme image
+            </div>
+            <div className="hero-step">
+              <span>2</span>
+              Student USN and sheet
+            </div>
+            <div className="hero-step">
+              <span>3</span>
+              Review and PDF
+            </div>
+          </div>
         </div>
 
         <div className="access-dock">
           <div className="dock-copy">
-            <p className="eyebrow">Secure access</p>
-            <h2>Teacher and student portals share one real evaluation workflow.</h2>
+            <p className="eyebrow">Portal login</p>
+            <h2>Teacher evaluation and student results in one place.</h2>
             <div className="mt-4 flex flex-wrap gap-2">
               <span className={health?.openai_configured ? "status-pill status-good" : "status-pill status-warn"}>
                 {health?.openai_configured ? "OpenAI ready" : "OpenAI key needed"}
@@ -868,7 +879,7 @@ function Landing({
               </label>
               <button className="btn-primary self-end" disabled={busy} type="submit">
                 {busy ? <Loader2 className="animate-spin" size={16} /> : <LockKeyhole size={16} />}
-                Login
+                Open portal
               </button>
             </div>
             {loginRole === "student" ? (

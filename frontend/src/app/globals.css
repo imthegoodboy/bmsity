@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 :root {
-  background: #f5f7f2;
+  background: #f5fbff;
   color: #172033;
 }
 
@@ -18,7 +18,9 @@ html {
 body {
   min-height: 100vh;
   margin: 0;
-  background: #f5f7f2;
+  background:
+    radial-gradient(circle at top left, rgba(186, 230, 253, 0.55), transparent 34rem),
+    linear-gradient(180deg, #f5fbff 0%, #ffffff 48%, #f8fcff 100%);
   color: #172033;
 }
 
@@ -43,7 +45,7 @@ textarea {
 
 @layer components {
   .field {
-    @apply w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-ink outline-none transition focus:border-pine focus:ring-4 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:opacity-60;
+    @apply w-full rounded-lg border border-sky-100 bg-white px-3 py-2 text-sm font-medium text-ink outline-none transition placeholder:text-slate-400 focus:border-sky-400 focus:ring-4 focus:ring-sky-100 disabled:cursor-not-allowed disabled:opacity-60;
   }
 
   .label {
@@ -55,11 +57,11 @@ textarea {
   }
 
   .btn-primary {
-    @apply btn bg-vermilion text-white shadow-soft hover:bg-red-700;
+    @apply btn bg-sky-500 text-white shadow-soft hover:bg-sky-600;
   }
 
   .btn-secondary {
-    @apply btn border border-slate-200 bg-white text-ink hover:border-pine hover:text-pine;
+    @apply btn border border-sky-100 bg-white text-ink hover:border-sky-300 hover:bg-sky-50 hover:text-pine;
   }
 
   .eyebrow {
@@ -67,7 +69,7 @@ textarea {
   }
 
   .hero-shell {
-    @apply relative flex min-h-[92vh] flex-col overflow-hidden px-4 pb-4 text-white sm:px-6 lg:px-8;
+    @apply relative flex min-h-[94svh] flex-col overflow-hidden px-4 pb-4 text-white sm:px-6 lg:px-8;
   }
 
   .hero-media {
@@ -77,7 +79,9 @@ textarea {
 
   .hero-shade {
     @apply absolute inset-0;
-    background: linear-gradient(90deg, rgba(9, 26, 31, 0.88) 0%, rgba(9, 26, 31, 0.66) 45%, rgba(9, 26, 31, 0.22) 100%);
+    background:
+      linear-gradient(90deg, rgba(8, 47, 73, 0.92) 0%, rgba(12, 74, 110, 0.72) 48%, rgba(14, 165, 233, 0.18) 100%),
+      linear-gradient(180deg, rgba(8, 47, 73, 0.12) 0%, rgba(8, 47, 73, 0.6) 100%);
   }
 
   .hero-nav {
@@ -90,15 +94,31 @@ textarea {
   }
 
   .hero-content {
-    @apply relative z-10 mx-auto flex w-full max-w-7xl flex-1 flex-col justify-center gap-5 py-10;
+    @apply relative z-10 mx-auto flex w-full max-w-7xl flex-1 flex-col justify-center gap-5 py-8;
   }
 
   .hero-content h1 {
-    @apply max-w-4xl text-4xl font-black leading-tight text-white sm:text-5xl lg:text-7xl;
+    @apply max-w-4xl text-4xl font-black leading-tight text-white sm:text-5xl lg:text-6xl;
+  }
+
+  .hero-flow {
+    @apply grid max-w-4xl gap-3 sm:grid-cols-3;
+  }
+
+  .hero-step {
+    @apply flex items-center gap-3 rounded-lg border border-white/15 bg-white/10 px-3 py-3 text-sm font-bold text-white shadow-soft backdrop-blur;
+  }
+
+  .hero-step span {
+    @apply inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sky-300 text-sm font-black text-sky-950;
   }
 
   .access-dock {
-    @apply relative z-10 mx-auto grid w-full max-w-7xl gap-5 rounded-lg border border-white/20 bg-white/95 p-4 text-ink shadow-soft backdrop-blur md:grid-cols-[minmax(0,0.72fr)_minmax(0,1fr)] md:p-5;
+    @apply relative z-10 mx-auto mb-2 grid w-full max-w-7xl gap-5 rounded-lg border border-white/60 bg-white/95 p-4 text-ink shadow-soft backdrop-blur md:grid-cols-[minmax(0,0.6fr)_minmax(0,1fr)] md:p-5;
+  }
+
+  .dock-copy {
+    @apply rounded-lg border border-sky-100 bg-skyglass p-4;
   }
 
   .dock-copy h2,
@@ -112,7 +132,7 @@ textarea {
   }
 
   .segmented {
-    @apply inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1;
+    @apply inline-flex rounded-lg border border-sky-100 bg-sky-50 p-1;
   }
 
   .segmented button,
@@ -122,11 +142,11 @@ textarea {
 
   .segmented button.active,
   .tabline button.active {
-    @apply bg-ink text-white;
+    @apply bg-sky-500 text-white shadow-sm;
   }
 
   .campus-strip {
-    @apply mx-auto grid w-full max-w-7xl gap-6 px-4 py-10 sm:px-6 lg:grid-cols-[minmax(0,0.7fr)_minmax(0,1fr)] lg:px-8;
+    @apply mx-auto grid w-full max-w-7xl gap-6 px-4 py-10 sm:px-6 lg:grid-cols-[minmax(0,0.72fr)_minmax(0,1fr)] lg:px-8;
   }
 
   .campus-strip h2 {
@@ -143,7 +163,7 @@ textarea {
   }
 
   .app-header {
-    @apply sticky top-0 z-30 flex flex-col gap-4 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8;
+    @apply sticky top-0 z-30 flex flex-col gap-4 border-b border-sky-100 bg-white/95 px-4 py-3 backdrop-blur sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8;
   }
 
   .brand-lockup {
@@ -167,12 +187,12 @@ textarea {
   }
 
   .tabline {
-    @apply flex flex-wrap gap-2 border-b border-slate-200 pb-3;
+    @apply flex flex-wrap gap-2 border-b border-sky-100 pb-3;
   }
 
   .workspace-section,
   .flow-panel {
-    @apply min-w-0 rounded-lg border border-slate-200 bg-white p-4 shadow-soft;
+    @apply min-w-0 rounded-lg border border-sky-100 bg-white p-4 shadow-soft;
   }
 
   .workspace-section {
@@ -197,11 +217,11 @@ textarea {
   }
 
   .upload-box {
-    @apply flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-slate-300 bg-[#f8fbf6] px-4 py-5 text-center text-sm font-bold text-pine transition hover:border-pine hover:bg-emerald-50;
+    @apply flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-sky-200 bg-skyglass px-4 py-5 text-center text-sm font-bold text-pine transition hover:border-sky-400 hover:bg-sky-50;
   }
 
   .rubric-builder {
-    @apply space-y-3 rounded-lg border border-slate-200 bg-[#fbfcf8] p-3;
+    @apply space-y-3 rounded-lg border border-sky-100 bg-skyglass p-3;
   }
 
   .mini-list,
@@ -214,13 +234,13 @@ textarea {
   .mini-row,
   .queue-row,
   .submission-row {
-    @apply flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-3 text-left text-sm transition;
+    @apply flex w-full items-center justify-between gap-3 rounded-lg border border-sky-100 bg-white px-3 py-3 text-left text-sm transition;
   }
 
   .mini-row:hover,
   .submission-row:hover,
   .submission-row.active {
-    @apply border-pine bg-emerald-50;
+    @apply border-sky-300 bg-sky-50;
   }
 
   .mini-row span,
@@ -241,7 +261,7 @@ textarea {
   }
 
   .fact {
-    @apply rounded-lg border border-slate-200 bg-[#fbfcf8] px-4 py-3;
+    @apply rounded-lg border border-sky-100 bg-white px-4 py-3 shadow-sm;
   }
 
   .fact strong {
@@ -269,11 +289,11 @@ textarea {
   }
 
   .status-info {
-    @apply border-slate-200 bg-slate-50 text-slate-700;
+    @apply border-sky-100 bg-sky-50 text-sky-700;
   }
 
   .notice {
-    @apply flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm font-bold text-emerald-800;
+    @apply flex items-start gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-3 text-sm font-bold text-sky-800;
   }
 
   .notice-bad {
@@ -281,11 +301,11 @@ textarea {
   }
 
   .empty-state {
-    @apply flex min-h-32 items-center justify-center gap-2 rounded-lg border border-dashed border-slate-300 bg-[#fbfcf8] px-4 py-6 text-center text-sm font-bold text-slate-500;
+    @apply flex min-h-32 items-center justify-center gap-2 rounded-lg border border-dashed border-sky-200 bg-skyglass px-4 py-6 text-center text-sm font-bold text-slate-500;
   }
 
   .evaluation-card {
-    @apply rounded-lg border border-slate-200 bg-white p-4 shadow-soft;
+    @apply rounded-lg border border-sky-100 bg-white p-4 shadow-soft;
   }
 
   .evaluation-card p {
@@ -301,7 +321,7 @@ textarea {
   }
 
   .table-wrap {
-    @apply overflow-x-auto rounded-lg border border-slate-200;
+    @apply overflow-x-auto rounded-lg border border-sky-100;
   }
 
   .table-wrap table {
@@ -309,7 +329,7 @@ textarea {
   }
 
   .table-wrap th {
-    @apply border-b border-slate-200 bg-[#fbfcf8] px-3 py-3 text-xs font-black uppercase tracking-normal text-slate-500;
+    @apply border-b border-sky-100 bg-skyglass px-3 py-3 text-xs font-black uppercase tracking-normal text-slate-500;
   }
 
   .table-wrap td {

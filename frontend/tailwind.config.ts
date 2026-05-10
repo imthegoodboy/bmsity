@@ -5,15 +5,15 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        page: "#f5f7f2",
-        skyglass: "#eef7f8",
-        ink: "#172033",
-        vermilion: "#c73d2f",
-        pine: "#0f6b5f",
-        brass: "#b7771c",
+        page: "#f5fbff",
+        skyglass: "#eaf6ff",
+        ink: "#0f172a",
+        vermilion: "#0ea5e9",
+        pine: "#0369a1",
+        brass: "#0f766e",
       },
       boxShadow: {
-        soft: "0 18px 45px rgba(23, 32, 51, 0.08)",
+        soft: "0 18px 45px rgba(14, 116, 144, 0.1)",
       },
     },
   },
