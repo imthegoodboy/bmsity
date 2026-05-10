@@ -14,12 +14,27 @@ def make_client(tmp_path: Path, monkeypatch) -> TestClient:
     settings.upload_dir = tmp_path / "uploads"
     settings.report_dir = tmp_path / "reports"
     settings.openai_api_key = "test-key"
+    settings.teacher_email = "teacher@bmsit.ac.in"
+    settings.teacher_password = "test-teacher-password"
+    settings.auth_secret = "test-secret"
     init_db(settings.database_path)
     monkeypatch.setattr(main.settings, "database_path", settings.database_path)
     monkeypatch.setattr(main.settings, "upload_dir", settings.upload_dir)
     monkeypatch.setattr(main.settings, "report_dir", settings.report_dir)
     monkeypatch.setattr(main.settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(main.settings, "teacher_email", "teacher@bmsit.ac.in")
+    monkeypatch.setattr(main.settings, "teacher_password", "test-teacher-password")
+    monkeypatch.setattr(main.settings, "auth_secret", "test-secret")
     return TestClient(main.app)
+
+
+def teacher_headers(client: TestClient) -> dict[str, str]:
+    response = client.post(
+        "/auth/teacher/login",
+        json={"identifier": "teacher@bmsit.ac.in", "password": "test-teacher-password"},
+    )
+    assert response.status_code == 200, response.text
+    return {"Authorization": f"Bearer {response.json()['token']}"}
 
 
 def exam_payload() -> dict:
@@ -46,7 +61,7 @@ def exam_payload() -> dict:
 
 
 def create_exam(client: TestClient) -> dict:
-    response = client.post("/exams", json=exam_payload())
+    response = client.post("/exams", json=exam_payload(), headers=teacher_headers(client))
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -56,6 +71,7 @@ def upload_submission(client: TestClient, exam_id: str) -> dict:
         f"/exams/{exam_id}/submissions",
         data={"student_name": "Asha", "usn": "1BM22CS101"},
         files={"files": ("sheet.png", b"fake-image", "image/png")},
+        headers=teacher_headers(client),
     )
     assert response.status_code == 200, response.text
     return response.json()
@@ -66,6 +82,7 @@ def test_create_exam_rejects_empty_schema(tmp_path, monkeypatch):
     response = client.post(
         "/exams",
         json={"title": "Bad", "subject": "Physics", "questions": []},
+        headers=teacher_headers(client),
     )
     assert response.status_code == 422
 
@@ -95,6 +112,7 @@ def test_schema_image_creates_exam(tmp_path, monkeypatch):
         "/schema/extract",
         data={"subject": "Computer Science", "title": "Answer Schema", "default_marks": "10"},
         files={"file": ("schema.webp", b"fake-schema-image", "image/webp")},
+        headers=teacher_headers(client),
     )
 
     assert response.status_code == 200, response.text
@@ -144,19 +162,24 @@ def test_submission_evaluation_update_and_report(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
 
-    start = client.post(f"/submissions/{submission['id']}/evaluate")
+    headers = teacher_headers(client)
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
     assert start.status_code == 200, start.text
 
-    fetched = client.get(f"/submissions/{submission['id']}").json()
+    fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
     assert fetched["status"] == "completed"
     assert fetched["total_score"] == 4
     assert fetched["evaluations"][1]["review_required"] is True
 
     evaluation_id = fetched["evaluations"][0]["id"]
-    updated = client.patch(f"/evaluations/{evaluation_id}", json={"final_score": 9}).json()
+    updated = client.patch(
+        f"/evaluations/{evaluation_id}",
+        json={"final_score": 9},
+        headers=headers,
+    ).json()
     assert updated["final_score"] == 2
 
-    report = client.get(f"/submissions/{submission['id']}/report")
+    report = client.get(f"/submissions/{submission['id']}/report", headers=headers)
     assert report.status_code == 200
     assert report.headers["content-type"] == "application/pdf"
 
@@ -167,6 +190,38 @@ def test_missing_openai_key_returns_setup_error(tmp_path, monkeypatch):
     exam = create_exam(client)
     submission = upload_submission(client, exam["id"])
 
-    response = client.post(f"/submissions/{submission['id']}/evaluate")
+    response = client.post(f"/submissions/{submission['id']}/evaluate", headers=teacher_headers(client))
     assert response.status_code == 400
     assert "OPENAI_API_KEY" in response.json()["detail"]
+
+
+def test_student_login_password_change_and_portal(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    exam = create_exam(client)
+    upload_submission(client, exam["id"])
+
+    login = client.post(
+        "/auth/student/login",
+        json={"identifier": "1bm22cs101", "password": "1BM22CS101"},
+    )
+    assert login.status_code == 200, login.text
+    student_token = login.json()["token"]
+    assert login.json()["force_password_change"] is True
+
+    portal = client.get("/students/me", headers={"Authorization": f"Bearer {student_token}"})
+    assert portal.status_code == 200, portal.text
+    assert portal.json()["submissions"][0]["exam"]["title"] == "Unit Test"
+
+    changed = client.post(
+        "/auth/student/change-password",
+        json={"current_password": "1BM22CS101", "new_password": "new-secure-pass"},
+        headers={"Authorization": f"Bearer {student_token}"},
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["force_password_change"] is False
+
+    old_login = client.post(
+        "/auth/student/login",
+        json={"identifier": "1BM22CS101", "password": "1BM22CS101"},
+    )
+    assert old_login.status_code == 401

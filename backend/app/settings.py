@@ -27,6 +27,10 @@ class Settings:
     upload_dir: Path = _path_from_env("UPLOAD_DIR", "./uploads")
     report_dir: Path = _path_from_env("REPORT_DIR", "./reports")
     frontend_origin: str = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
+    teacher_email: str = os.getenv("TEACHER_EMAIL", "teacher@bmsit.ac.in")
+    teacher_password: str = os.getenv("TEACHER_PASSWORD", "bmsit-teacher")
+    auth_secret: str = os.getenv("AUTH_SECRET", "change-this-dev-secret")
+    auth_token_ttl_minutes: int = int(os.getenv("AUTH_TOKEN_TTL_MINUTES", "720"))
 
 
 settings = Settings()

@@ -91,6 +91,16 @@ def init_db(path: Path | None = None) -> None:
                 UNIQUE(submission_id, question_id),
                 FOREIGN KEY (submission_id) REFERENCES submissions(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS student_accounts (
+                usn TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL DEFAULT '',
+                force_password_change INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_submissions_usn ON submissions(usn);
             """
         )
 
