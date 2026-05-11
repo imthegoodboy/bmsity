@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 :root {
-  background: #f5f7f2;
+  background: #f5fbff;
   color: #172033;
 }
 
@@ -18,8 +18,17 @@ html {
 body {
   min-height: 100vh;
   margin: 0;
-  background: #f5f7f2;
+  background:
+    linear-gradient(90deg, rgba(14, 165, 233, 0.08) 0 1px, transparent 1px 100%),
+    linear-gradient(180deg, #f6fbff 0%, #ffffff 44%, #f8fcff 100%);
+  background-size: 64px 100%, auto;
   color: #172033;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+::selection {
+  background: rgba(14, 165, 233, 0.18);
 }
 
 button,
@@ -43,7 +52,7 @@ textarea {
 
 @layer components {
   .field {
-    @apply w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-ink outline-none transition focus:border-pine focus:ring-4 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:opacity-60;
+    @apply w-full rounded-lg border border-sky-100 bg-white px-3 py-2 text-sm font-medium text-ink outline-none transition placeholder:text-slate-400 focus:border-sky-400 focus:ring-4 focus:ring-sky-100 disabled:cursor-not-allowed disabled:opacity-60;
   }
 
   .label {
@@ -55,53 +64,179 @@ textarea {
   }
 
   .btn-primary {
-    @apply btn bg-vermilion text-white shadow-soft hover:bg-red-700;
+    @apply btn bg-sky-500 text-white shadow-soft hover:bg-sky-600;
   }
 
   .btn-secondary {
-    @apply btn border border-slate-200 bg-white text-ink hover:border-pine hover:text-pine;
+    @apply btn border border-sky-100 bg-white text-ink hover:border-sky-300 hover:bg-sky-50 hover:text-pine;
+  }
+
+  .btn-primary:not(:disabled):hover,
+  .btn-secondary:not(:disabled):hover {
+    transform: translateY(-1px);
   }
 
   .eyebrow {
-    @apply text-xs font-black uppercase tracking-normal text-vermilion;
+    @apply text-xs font-black uppercase tracking-normal text-sky-600;
   }
 
-  .hero-shell {
-    @apply relative flex min-h-[92vh] flex-col overflow-hidden px-4 pb-4 text-white sm:px-6 lg:px-8;
+  .home-shell {
+    @apply mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-10 px-5 py-6 sm:px-8 lg:px-10;
   }
 
-  .hero-media {
-    @apply absolute inset-0 bg-cover bg-center;
-    background-image: url("/brand/bmsit-hero.jpg");
+  .home-nav {
+    @apply flex flex-col gap-4 border-b border-sky-100 pb-5 sm:flex-row sm:items-center sm:justify-between;
   }
 
-  .hero-shade {
-    @apply absolute inset-0;
-    background: linear-gradient(90deg, rgba(9, 26, 31, 0.88) 0%, rgba(9, 26, 31, 0.66) 45%, rgba(9, 26, 31, 0.22) 100%);
+  .wordmark {
+    @apply flex items-center gap-3;
   }
 
-  .hero-nav {
-    @apply relative z-10 mx-auto flex w-full max-w-7xl items-center justify-between py-5;
+  .wordmark > span {
+    @apply inline-flex h-11 w-11 items-center justify-center rounded-full bg-sky-500 text-base font-black text-white;
   }
 
-  .hero-nav img,
+  .wordmark strong {
+    @apply block text-2xl font-black leading-none text-ink;
+  }
+
+  .wordmark small {
+    @apply mt-1 block text-sm font-semibold text-slate-500;
+  }
+
+  .system-strip {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  .home-grid {
+    @apply grid flex-1 items-center gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(340px,0.58fr)];
+  }
+
+  .hero-clean {
+    @apply grid flex-1 items-center gap-10 py-8 lg:grid-cols-[minmax(0,0.95fr)_minmax(360px,0.75fr)];
+  }
+
+  .hero-copy {
+    @apply min-w-0;
+  }
+
+  .hero-copy h2 {
+    @apply mt-4 max-w-4xl text-4xl font-black leading-tight text-ink sm:text-5xl lg:text-7xl;
+    text-wrap: balance;
+  }
+
+  .hero-copy p {
+    @apply mt-5 max-w-2xl text-base font-semibold leading-7 text-slate-600 sm:text-lg;
+  }
+
+  .hero-actions {
+    @apply mt-8 flex flex-wrap gap-3;
+  }
+
+  .hero-visual {
+    @apply min-h-[360px] overflow-hidden rounded-lg border border-sky-100 bg-white p-2 shadow-soft;
+  }
+
+  .hero-visual img {
+    @apply h-full min-h-[340px] w-full rounded-md object-cover;
+  }
+
+  .process-line {
+    @apply grid gap-3 border-t border-sky-100 pt-6 sm:grid-cols-2 lg:grid-cols-4;
+  }
+
+  .process-line div {
+    @apply min-h-40 rounded-xl border border-sky-100 bg-white p-4 shadow-sm;
+  }
+
+  .process-line svg {
+    @apply mb-5 text-sky-500;
+  }
+
+  .process-line strong {
+    @apply block text-lg font-black text-ink;
+  }
+
+  .process-line span {
+    @apply mt-2 block text-sm font-semibold leading-6 text-slate-500;
+  }
+
+  .login-page {
+    @apply flex min-h-screen items-center justify-center px-4 py-8;
+  }
+
+  .login-panel {
+    @apply w-full max-w-xl space-y-5 rounded-lg border border-sky-100 bg-white p-5 shadow-soft sm:p-7;
+  }
+
+  .home-intro {
+    @apply min-w-0;
+  }
+
+  .home-intro h1 {
+    @apply mt-4 max-w-4xl text-5xl font-black leading-tight text-ink sm:text-6xl lg:text-7xl;
+  }
+
+  .workflow-grid {
+    @apply mt-10 grid max-w-3xl gap-0 border-y border-sky-100 sm:grid-cols-3;
+  }
+
+  .workflow-card {
+    @apply flex min-h-28 items-center gap-4 border-b border-sky-100 py-5 text-sky-900 sm:border-b-0 sm:border-r sm:pr-5;
+  }
+
+  .workflow-card:last-child {
+    @apply border-b-0 sm:border-r-0;
+  }
+
+  .workflow-card span {
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-sky-500 text-sm font-black text-white;
+  }
+
+  .workflow-card svg {
+    @apply shrink-0 text-sky-500;
+  }
+
+  .workflow-card strong {
+    @apply text-xl font-black text-ink;
+  }
+
+  .login-card {
+    @apply min-w-0 border-t border-sky-100 pt-8 lg:border-l lg:border-t-0 lg:pl-10 lg:pt-0;
+  }
+
+  .login-head {
+    @apply mb-8 flex flex-col gap-5;
+  }
+
+  .login-head h2 {
+    @apply text-4xl font-black text-ink;
+  }
+
+  .login-card .segmented {
+    @apply border-0 bg-transparent p-0;
+  }
+
+  .login-card .segmented button {
+    @apply rounded-none border-b-2 border-transparent px-0 pb-2 pt-0 text-slate-500;
+  }
+
+  .login-card .segmented button + button {
+    @apply ml-5;
+  }
+
+  .login-card .segmented button.active {
+    @apply border-sky-500 bg-transparent text-sky-600 shadow-none;
+  }
+
+  .login-card .field {
+    @apply rounded-none border-x-0 border-t-0 border-b-sky-200 bg-transparent px-0 py-3 focus:border-sky-500 focus:ring-0;
+  }
+
   .brand-lockup img {
     @apply rounded-lg;
   }
 
-  .hero-content {
-    @apply relative z-10 mx-auto flex w-full max-w-7xl flex-1 flex-col justify-center gap-5 py-10;
-  }
-
-  .hero-content h1 {
-    @apply max-w-4xl text-4xl font-black leading-tight text-white sm:text-5xl lg:text-7xl;
-  }
-
-  .access-dock {
-    @apply relative z-10 mx-auto grid w-full max-w-7xl gap-5 rounded-lg border border-white/20 bg-white/95 p-4 text-ink shadow-soft backdrop-blur md:grid-cols-[minmax(0,0.72fr)_minmax(0,1fr)] md:p-5;
-  }
-
-  .dock-copy h2,
   .section-head h2,
   .workspace-section h2 {
     @apply text-xl font-black leading-snug text-ink sm:text-2xl;
@@ -112,7 +247,7 @@ textarea {
   }
 
   .segmented {
-    @apply inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1;
+    @apply inline-flex rounded-lg border border-sky-100 bg-sky-50 p-1;
   }
 
   .segmented button,
@@ -122,18 +257,9 @@ textarea {
 
   .segmented button.active,
   .tabline button.active {
-    @apply bg-ink text-white;
+    @apply bg-sky-500 text-white shadow-sm;
   }
 
-  .campus-strip {
-    @apply mx-auto grid w-full max-w-7xl gap-6 px-4 py-10 sm:px-6 lg:grid-cols-[minmax(0,0.7fr)_minmax(0,1fr)] lg:px-8;
-  }
-
-  .campus-strip h2 {
-    @apply max-w-2xl text-2xl font-black text-ink sm:text-3xl;
-  }
-
-  .campus-facts,
   .score-band {
     @apply grid gap-3 sm:grid-cols-2 lg:grid-cols-4;
   }
@@ -143,7 +269,7 @@ textarea {
   }
 
   .app-header {
-    @apply sticky top-0 z-30 flex flex-col gap-4 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8;
+    @apply sticky top-0 z-30 flex flex-col gap-4 border-b border-sky-100 bg-white/95 px-4 py-3 backdrop-blur sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8;
   }
 
   .brand-lockup {
@@ -166,17 +292,51 @@ textarea {
     @apply flex flex-wrap items-center gap-2;
   }
 
+  .header-tabs {
+    @apply flex max-w-full gap-1 overflow-x-auto rounded-lg border border-sky-100 bg-sky-50 p-1;
+    scrollbar-width: none;
+  }
+
+  .header-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .header-tabs a {
+    @apply shrink-0 rounded-md px-3 py-2 text-sm font-black text-slate-600 transition hover:bg-white hover:text-sky-700;
+  }
+
+  .header-tabs a.active {
+    @apply bg-white text-sky-700 shadow-sm;
+  }
+
   .tabline {
-    @apply flex flex-wrap gap-2 border-b border-slate-200 pb-3;
+    @apply flex flex-wrap gap-2 border-b border-sky-100 pb-3;
   }
 
   .workspace-section,
   .flow-panel {
-    @apply min-w-0 rounded-lg border border-slate-200 bg-white p-4 shadow-soft;
+    @apply min-w-0 rounded-lg border border-sky-100 bg-white p-4 shadow-soft;
   }
 
   .workspace-section {
     @apply space-y-5;
+  }
+
+  .page-hero {
+    @apply flex flex-col gap-4 border-b border-sky-100 bg-transparent pb-5 lg:flex-row lg:items-center lg:justify-between;
+  }
+
+  .page-hero h2 {
+    @apply mt-2 text-3xl font-black leading-tight text-ink;
+    text-wrap: balance;
+  }
+
+  .page-hero p {
+    @apply mt-2 max-w-3xl text-sm font-semibold leading-6 text-slate-500;
+  }
+
+  .teacher-grid {
+    @apply grid gap-5 xl:grid-cols-2;
   }
 
   .flow-panel {
@@ -197,11 +357,11 @@ textarea {
   }
 
   .upload-box {
-    @apply flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-slate-300 bg-[#f8fbf6] px-4 py-5 text-center text-sm font-bold text-pine transition hover:border-pine hover:bg-emerald-50;
+    @apply flex min-h-32 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-sky-200 bg-skyglass px-4 py-5 text-center text-sm font-bold text-pine transition hover:border-sky-400 hover:bg-sky-50;
   }
 
   .rubric-builder {
-    @apply space-y-3 rounded-lg border border-slate-200 bg-[#fbfcf8] p-3;
+    @apply space-y-3 rounded-lg border border-sky-100 bg-skyglass p-3;
   }
 
   .mini-list,
@@ -214,13 +374,17 @@ textarea {
   .mini-row,
   .queue-row,
   .submission-row {
-    @apply flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-3 text-left text-sm transition;
+    @apply flex w-full items-center justify-between gap-3 rounded-lg border border-sky-100 bg-white px-3 py-3 text-left text-sm transition;
+  }
+
+  .agent-banner {
+    @apply flex items-center gap-2 rounded-lg border border-sky-100 bg-sky-50 px-3 py-3 text-sm font-semibold text-sky-800;
   }
 
   .mini-row:hover,
   .submission-row:hover,
   .submission-row.active {
-    @apply border-pine bg-emerald-50;
+    @apply border-sky-300 bg-sky-50;
   }
 
   .mini-row span,
@@ -241,7 +405,7 @@ textarea {
   }
 
   .fact {
-    @apply rounded-lg border border-slate-200 bg-[#fbfcf8] px-4 py-3;
+    @apply rounded-lg border border-sky-100 bg-white px-4 py-3 shadow-sm;
   }
 
   .fact strong {
@@ -269,11 +433,11 @@ textarea {
   }
 
   .status-info {
-    @apply border-slate-200 bg-slate-50 text-slate-700;
+    @apply border-sky-100 bg-sky-50 text-sky-700;
   }
 
   .notice {
-    @apply flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm font-bold text-emerald-800;
+    @apply flex items-start gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-3 text-sm font-bold text-sky-800;
   }
 
   .notice-bad {
@@ -281,11 +445,11 @@ textarea {
   }
 
   .empty-state {
-    @apply flex min-h-32 items-center justify-center gap-2 rounded-lg border border-dashed border-slate-300 bg-[#fbfcf8] px-4 py-6 text-center text-sm font-bold text-slate-500;
+    @apply flex min-h-32 items-center justify-center gap-2 rounded-lg border border-dashed border-sky-200 bg-skyglass px-4 py-6 text-center text-sm font-bold text-slate-500;
   }
 
   .evaluation-card {
-    @apply rounded-lg border border-slate-200 bg-white p-4 shadow-soft;
+    @apply rounded-lg border border-sky-100 bg-white p-4 shadow-soft;
   }
 
   .evaluation-card p {
@@ -301,7 +465,7 @@ textarea {
   }
 
   .table-wrap {
-    @apply overflow-x-auto rounded-lg border border-slate-200;
+    @apply overflow-x-auto rounded-lg border border-sky-100;
   }
 
   .table-wrap table {
@@ -309,10 +473,46 @@ textarea {
   }
 
   .table-wrap th {
-    @apply border-b border-slate-200 bg-[#fbfcf8] px-3 py-3 text-xs font-black uppercase tracking-normal text-slate-500;
+    @apply border-b border-sky-100 bg-skyglass px-3 py-3 text-xs font-black uppercase tracking-normal text-slate-500;
   }
 
   .table-wrap td {
     @apply border-b border-slate-100 px-3 py-3 font-semibold text-slate-700;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .hero-copy,
+    .hero-visual,
+    .process-line div,
+    .workspace-section,
+    .flow-panel,
+    .page-hero {
+      animation: soft-enter 480ms ease both;
+    }
+
+    .hero-visual,
+    .process-line div:nth-child(2),
+    .workspace-section:nth-child(2) {
+      animation-delay: 80ms;
+    }
+
+    .process-line div:nth-child(3) {
+      animation-delay: 130ms;
+    }
+
+    .process-line div:nth-child(4) {
+      animation-delay: 180ms;
+    }
+  }
+}
+
+@keyframes soft-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }

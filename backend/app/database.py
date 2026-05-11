@@ -40,6 +40,7 @@ def init_db(path: Path | None = None) -> None:
                 title TEXT NOT NULL,
                 subject TEXT NOT NULL,
                 total_marks REAL NOT NULL,
+                max_questions_to_grade INTEGER,
                 instructions TEXT NOT NULL DEFAULT '',
                 questions_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
@@ -57,6 +58,7 @@ def init_db(path: Path | None = None) -> None:
                 error TEXT NOT NULL DEFAULT '',
                 overall_feedback TEXT NOT NULL DEFAULT '',
                 weak_areas_json TEXT NOT NULL DEFAULT '[]',
+                published INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE CASCADE
@@ -79,6 +81,8 @@ def init_db(path: Path | None = None) -> None:
                 question_id TEXT NOT NULL,
                 question_text TEXT NOT NULL,
                 answer_text TEXT NOT NULL,
+                attempted INTEGER NOT NULL DEFAULT 0,
+                counts_toward_total INTEGER NOT NULL DEFAULT 1,
                 score REAL NOT NULL,
                 max_marks REAL NOT NULL,
                 final_score REAL NOT NULL,
@@ -103,6 +107,28 @@ def init_db(path: Path | None = None) -> None:
             CREATE INDEX IF NOT EXISTS idx_submissions_usn ON submissions(usn);
             """
         )
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(submissions)").fetchall()
+        }
+        if "published" not in columns:
+            conn.execute("ALTER TABLE submissions ADD COLUMN published INTEGER NOT NULL DEFAULT 0")
+        exam_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(exams)").fetchall()
+        }
+        if "max_questions_to_grade" not in exam_columns:
+            conn.execute("ALTER TABLE exams ADD COLUMN max_questions_to_grade INTEGER")
+        evaluation_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(evaluations)").fetchall()
+        }
+        if "attempted" not in evaluation_columns:
+            conn.execute("ALTER TABLE evaluations ADD COLUMN attempted INTEGER NOT NULL DEFAULT 0")
+        if "counts_toward_total" not in evaluation_columns:
+            conn.execute(
+                "ALTER TABLE evaluations ADD COLUMN counts_toward_total INTEGER NOT NULL DEFAULT 1"
+            )
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:

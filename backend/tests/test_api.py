@@ -60,6 +60,23 @@ def exam_payload() -> dict:
     }
 
 
+def choice_exam_payload() -> dict:
+    return {
+        "title": "Choice Test",
+        "subject": "Computer Vision",
+        "max_questions_to_grade": 4,
+        "questions": [
+            {
+                "id": f"Q{index}",
+                "text": f"Question {index}",
+                "max_marks": 10,
+                "model_answer": f"Model answer {index}",
+            }
+            for index in range(1, 9)
+        ],
+    }
+
+
 def create_exam(client: TestClient) -> dict:
     response = client.post("/exams", json=exam_payload(), headers=teacher_headers(client))
     assert response.status_code == 200, response.text
@@ -123,6 +140,87 @@ def test_schema_image_creates_exam(tmp_path, monkeypatch):
     assert "components" in payload["questions"][0]["text"]
 
 
+def test_schema_choice_rule_normalizes_total_and_per_question_marks(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+
+    def fake_schema_extractor(**kwargs):
+        return {
+            "title": "BAI505B CV IA 1",
+            "subject": "Computer Vision",
+            "instructions": "Answer any four questions.",
+            "total_marks": 40,
+            "max_questions_to_grade": 4,
+            "choice_rule": "Answer any 4 out of 8 questions.",
+            "questions": [
+                {
+                    "id": str(index),
+                    "text": f"Question {index}",
+                    "max_marks": 40,
+                    "model_answer": f"Model answer {index}",
+                    "marking_rules": "",
+                    "keywords": [],
+                }
+                for index in range(1, 9)
+            ],
+        }
+
+    monkeypatch.setattr(main, "extract_schema_with_openai", fake_schema_extractor)
+    response = client.post(
+        "/schema/extract",
+        data={"subject": "Computer Vision", "title": "Choice Paper", "default_marks": "40"},
+        files={"file": ("schema.pdf", b"fake-schema-pdf", "application/pdf")},
+        headers=teacher_headers(client),
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["total_marks"] == 40
+    assert payload["max_questions_to_grade"] == 4
+    assert len(payload["questions"]) == 8
+    assert all(question["max_marks"] == 10 for question in payload["questions"])
+
+
+def test_schema_total_marks_overrides_wrong_all_questions_extraction(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+
+    def fake_schema_extractor(**kwargs):
+        return {
+            "title": "BAI505B CV IA 1",
+            "subject": "Computer Vision",
+            "instructions": "Answer all questions. Max. Marks: 40",
+            "total_marks": 40,
+            "max_questions_to_grade": 8,
+            "choice_rule": "Answer all questions",
+            "questions": [
+                {
+                    "id": str(index),
+                    "text": f"Question {index}",
+                    "max_marks": 12 if index == 3 else 5 if index == 5 else 10,
+                    "model_answer": f"Model answer {index}",
+                    "marking_rules": "",
+                    "keywords": [],
+                }
+                for index in range(1, 9)
+            ],
+        }
+
+    monkeypatch.setattr(main, "extract_schema_with_openai", fake_schema_extractor)
+    response = client.post(
+        "/schema/extract",
+        data={"subject": "Computer Vision", "title": "Choice Paper"},
+        files={"file": ("schema.pdf", b"fake-schema-pdf", "application/pdf")},
+        headers=teacher_headers(client),
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["total_marks"] == 40
+    assert payload["max_questions_to_grade"] == 4
+    assert all(question["max_marks"] == 10 for question in payload["questions"])
+    assert "answer all questions" not in payload["instructions"].lower()
+    assert "best 4 of 8" in payload["instructions"].lower()
+
+
 def test_submission_evaluation_update_and_report(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch)
     exam = create_exam(client)
@@ -168,6 +266,7 @@ def test_submission_evaluation_update_and_report(tmp_path, monkeypatch):
 
     fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
     assert fetched["status"] == "completed"
+    assert fetched["published"] is False
     assert fetched["total_score"] == 4
     assert fetched["evaluations"][1]["review_required"] is True
 
@@ -184,6 +283,101 @@ def test_submission_evaluation_update_and_report(tmp_path, monkeypatch):
     assert report.headers["content-type"] == "application/pdf"
 
 
+def test_evaluation_backfills_missing_questions_for_review(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    exam = create_exam(client)
+    submission = upload_submission(client, exam["id"])
+
+    def fake_evaluator(**kwargs):
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "questions": [
+                {
+                    "question_id": "Q1",
+                    "answer_text": "Velocity is speed with direction.",
+                    "score": 2,
+                    "max_marks": 2,
+                    "reason": "Correct.",
+                    "missing_points": [],
+                    "confidence": 96,
+                    "review_required": False,
+                }
+            ],
+            "summary": {
+                "overall_feedback": "Question Q2 needs review.",
+                "weak_areas": ["Missing evaluation"],
+            },
+        }
+
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+
+    headers = teacher_headers(client)
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+
+    fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
+    assert fetched["status"] == "completed"
+    assert fetched["total_score"] == 2
+    assert len(fetched["evaluations"]) == 2
+
+    q2 = next(item for item in fetched["evaluations"] if item["question_id"] == "Q2")
+    assert q2["score"] == 0
+    assert q2["final_score"] == 0
+    assert q2["confidence"] == 0
+    assert q2["review_required"] is True
+
+
+def test_choice_exam_scores_best_attempted_questions_only(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    headers = teacher_headers(client)
+    exam_response = client.post("/exams", json=choice_exam_payload(), headers=headers)
+    assert exam_response.status_code == 200, exam_response.text
+    exam = exam_response.json()
+    assert exam["total_marks"] == 40
+
+    submission = upload_submission(client, exam["id"])
+
+    def fake_evaluator(**kwargs):
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "questions": [
+                {
+                    "question_id": f"Q{index}",
+                    "answer_text": f"Student answer {index}" if index <= 5 else "",
+                    "attempted": index <= 5 and index != 4,
+                    "score": score,
+                    "max_marks": 10,
+                    "reason": "Checked.",
+                    "missing_points": [],
+                    "confidence": 90,
+                    "review_required": False,
+                }
+                for index, score in enumerate([8, 7, 6, 5, 9, 0, 0, 0], start=1)
+            ],
+            "summary": {
+                "overall_feedback": "Best four attempted questions counted.",
+                "weak_areas": [],
+            },
+        }
+
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+
+    fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
+    assert fetched["status"] == "completed"
+    assert fetched["total_score"] == 30
+    assert fetched["total_marks"] == 40
+
+    counted = {item["question_id"] for item in fetched["evaluations"] if item["counts_toward_total"]}
+    assert counted == {"Q1", "Q2", "Q3", "Q5"}
+    assert next(item for item in fetched["evaluations"] if item["question_id"] == "Q4")["attempted"] is True
+    assert next(item for item in fetched["evaluations"] if item["question_id"] == "Q4")["counts_toward_total"] is False
+    assert next(item for item in fetched["evaluations"] if item["question_id"] == "Q8")["attempted"] is False
+
+
 def test_missing_openai_key_returns_setup_error(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch)
     main.settings.openai_api_key = ""
@@ -198,7 +392,61 @@ def test_missing_openai_key_returns_setup_error(tmp_path, monkeypatch):
 def test_student_login_password_change_and_portal(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch)
     exam = create_exam(client)
-    upload_submission(client, exam["id"])
+    submission = upload_submission(client, exam["id"])
+
+    def fake_evaluator(**kwargs):
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "questions": [
+                {
+                    "question_id": "Q1",
+                    "answer_text": "Velocity is speed with direction.",
+                    "score": 2,
+                    "max_marks": 2,
+                    "reason": "Correct.",
+                    "missing_points": [],
+                    "confidence": 96,
+                    "review_required": False,
+                },
+                {
+                    "question_id": "Q2",
+                    "answer_text": "Acceleration is the rate of velocity change.",
+                    "score": 3,
+                    "max_marks": 3,
+                    "reason": "Correct.",
+                    "missing_points": [],
+                    "confidence": 94,
+                    "review_required": False,
+                },
+            ],
+            "summary": {
+                "overall_feedback": "Strong basics.",
+                "weak_areas": [],
+            },
+        }
+
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+    headers = teacher_headers(client)
+
+    blocked_login = client.post(
+        "/auth/student/login",
+        json={"identifier": "1bm22cs101", "password": "1BM22CS101"},
+    )
+    assert blocked_login.status_code == 401
+
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+
+    blocked_after_eval = client.post(
+        "/auth/student/login",
+        json={"identifier": "1bm22cs101", "password": "1BM22CS101"},
+    )
+    assert blocked_after_eval.status_code == 401
+
+    publish = client.post(f"/submissions/{submission['id']}/publish", headers=headers)
+    assert publish.status_code == 200, publish.text
+    assert publish.json()["published"] is True
 
     login = client.post(
         "/auth/student/login",

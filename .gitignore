@@ -9,6 +9,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.log
+*.tsbuildinfo
 *.db
 *.sqlite
 *.sqlite3
