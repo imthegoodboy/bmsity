@@ -95,6 +95,7 @@ class SubmissionOut(BaseModel):
     student_name: str
     usn: str
     status: str
+    published: bool = False
     total_score: float
     total_marks: float
     average_confidence: float
@@ -163,6 +164,7 @@ class StudentSubmissionOut(BaseModel):
     student_name: str
     usn: str
     status: str
+    published: bool
     total_score: float
     total_marks: float
     average_confidence: float

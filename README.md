@@ -6,11 +6,12 @@ BMSIT&M-branded AI answer sheet evaluation portal for teachers and students.
 
 - Teacher login with token-based access.
 - Student login by USN, with first-login password change.
+- Separate pages for exams, checking, review, analytics, and the student portal.
 - Create exams manually or extract rubrics from answer scheme files.
-- Upload one or many student answer sheet batches.
-- Evaluate submissions with OpenAI vision models.
-- Teacher review, mark editing, approval, re-checking, and PDF export.
-- Student dashboard with question-wise marks, feedback, weak areas, and PDF download.
+- Upload one or many answer sheet pages for each student.
+- Evaluate submissions with OpenAI vision models, one queued agent run per student.
+- Teacher review, mark editing, publishing, re-checking, and PDF export.
+- Student dashboard with question-wise marks, feedback, weak areas, and PDF download after publish.
 - Class analytics from real completed submissions.
 
 ## Backend
@@ -34,6 +35,16 @@ npm run dev -- --hostname 127.0.0.1 --port 3000
 ```
 
 Open `http://127.0.0.1:3000`.
+
+Routes:
+
+- `/` homepage
+- `/login` teacher/student login
+- `/teacher/exams` create exams and rubrics
+- `/teacher/check` upload student answer sheets and run checking agents
+- `/teacher/review` review, edit marks, publish, and export PDF
+- `/teacher/analytics` class analytics
+- `/student` published student reports
 
 ## Login
 

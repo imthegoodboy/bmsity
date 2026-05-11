@@ -260,7 +260,7 @@ def student_login(payload: LoginIn) -> AuthOut:
             conn.execute(
                 """
                 SELECT student_name, usn FROM submissions
-                WHERE UPPER(usn) = ?
+                WHERE UPPER(usn) = ? AND status = 'completed' AND published = 1
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
@@ -654,7 +654,7 @@ def student_portal(user: AuthUser = Depends(require_student)) -> StudentPortalOu
                     e.created_at AS exam_created_at
                 FROM submissions s
                 JOIN exams e ON e.id = s.exam_id
-                WHERE UPPER(s.usn) = ?
+                WHERE UPPER(s.usn) = ? AND s.status = 'completed' AND s.published = 1
                 ORDER BY s.created_at DESC
                 """,
                 (user.subject,),
@@ -679,6 +679,7 @@ def student_portal(user: AuthUser = Depends(require_student)) -> StudentPortalOu
                 "student_name": bundle.student_name,
                 "usn": bundle.usn,
                 "status": bundle.status,
+                "published": bool(bundle.published),
                 "total_score": bundle.total_score,
                 "total_marks": bundle.total_marks,
                 "average_confidence": bundle.average_confidence,
@@ -840,7 +841,7 @@ def start_evaluation(
 
     with get_db() as conn:
         conn.execute(
-            "UPDATE submissions SET status = 'running', error = '', updated_at = ? WHERE id = ?",
+            "UPDATE submissions SET status = 'running', error = '', published = 0, updated_at = ? WHERE id = ?",
             (now_iso(), submission_id),
         )
 
@@ -850,6 +851,25 @@ def start_evaluation(
         status="running",
         message="Evaluation started.",
     )
+
+
+@app.post("/submissions/{submission_id}/publish", response_model=SubmissionOut)
+def publish_submission(
+    submission_id: str,
+    _: AuthUser = Depends(require_teacher),
+) -> SubmissionOut:
+    submission = _submission_bundle(submission_id)
+    if submission.status != "completed":
+        raise HTTPException(status_code=400, detail="Complete evaluation before publishing.")
+    if not submission.evaluations:
+        raise HTTPException(status_code=400, detail="Publish requires at least one evaluated question.")
+
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE submissions SET published = 1, updated_at = ? WHERE id = ?",
+            (now_iso(), submission_id),
+        )
+    return _submission_bundle(submission_id)
 
 
 @app.patch("/evaluations/{evaluation_id}", response_model=EvaluationOut)
@@ -900,11 +920,13 @@ def update_evaluation(
 @app.get("/submissions/{submission_id}/report")
 def export_report(
     submission_id: str,
-    _: AuthUser = Depends(require_submission_access),
+    user: AuthUser = Depends(require_submission_access),
 ) -> FileResponse:
     submission = _submission_bundle(submission_id)
     if submission.status != "completed":
         raise HTTPException(status_code=400, detail="Complete evaluation before exporting.")
+    if user.role == "student" and not submission.published:
+        raise HTTPException(status_code=403, detail="This result has not been published yet.")
     exam = _get_exam_or_404(submission.exam_id)
     evaluations = [item.model_dump() for item in submission.evaluations]
     destination = settings.report_dir / f"{submission_id}.pdf"

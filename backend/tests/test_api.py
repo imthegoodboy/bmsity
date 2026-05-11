@@ -168,6 +168,7 @@ def test_submission_evaluation_update_and_report(tmp_path, monkeypatch):
 
     fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
     assert fetched["status"] == "completed"
+    assert fetched["published"] is False
     assert fetched["total_score"] == 4
     assert fetched["evaluations"][1]["review_required"] is True
 
@@ -198,7 +199,61 @@ def test_missing_openai_key_returns_setup_error(tmp_path, monkeypatch):
 def test_student_login_password_change_and_portal(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch)
     exam = create_exam(client)
-    upload_submission(client, exam["id"])
+    submission = upload_submission(client, exam["id"])
+
+    def fake_evaluator(**kwargs):
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "questions": [
+                {
+                    "question_id": "Q1",
+                    "answer_text": "Velocity is speed with direction.",
+                    "score": 2,
+                    "max_marks": 2,
+                    "reason": "Correct.",
+                    "missing_points": [],
+                    "confidence": 96,
+                    "review_required": False,
+                },
+                {
+                    "question_id": "Q2",
+                    "answer_text": "Acceleration is the rate of velocity change.",
+                    "score": 3,
+                    "max_marks": 3,
+                    "reason": "Correct.",
+                    "missing_points": [],
+                    "confidence": 94,
+                    "review_required": False,
+                },
+            ],
+            "summary": {
+                "overall_feedback": "Strong basics.",
+                "weak_areas": [],
+            },
+        }
+
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+    headers = teacher_headers(client)
+
+    blocked_login = client.post(
+        "/auth/student/login",
+        json={"identifier": "1bm22cs101", "password": "1BM22CS101"},
+    )
+    assert blocked_login.status_code == 401
+
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+
+    blocked_after_eval = client.post(
+        "/auth/student/login",
+        json={"identifier": "1bm22cs101", "password": "1BM22CS101"},
+    )
+    assert blocked_after_eval.status_code == 401
+
+    publish = client.post(f"/submissions/{submission['id']}/publish", headers=headers)
+    assert publish.status_code == 200, publish.text
+    assert publish.json()["published"] is True
 
     login = client.post(
         "/auth/student/login",

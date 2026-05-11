@@ -57,6 +57,7 @@ def init_db(path: Path | None = None) -> None:
                 error TEXT NOT NULL DEFAULT '',
                 overall_feedback TEXT NOT NULL DEFAULT '',
                 weak_areas_json TEXT NOT NULL DEFAULT '[]',
+                published INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE CASCADE
@@ -103,6 +104,12 @@ def init_db(path: Path | None = None) -> None:
             CREATE INDEX IF NOT EXISTS idx_submissions_usn ON submissions(usn);
             """
         )
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(submissions)").fetchall()
+        }
+        if "published" not in columns:
+            conn.execute("ALTER TABLE submissions ADD COLUMN published INTEGER NOT NULL DEFAULT 0")
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
