@@ -213,7 +213,7 @@ export default function StudentPage() {
                     />
                     <Fact label="Score" value={`${scorePercent(activeSubmission)}%`} />
                     <Fact label="Confidence" value={`${formatNumber(activeSubmission.average_confidence)}%`} />
-                    <Fact label="Weak areas" value={String(activeSubmission.weak_areas.length)} />
+                    <Fact label="Attempted" value={String(activeSubmission.evaluations.filter((item) => item.attempted).length)} />
                   </div>
                   <div className="evaluation-stack">
                     {activeSubmission.evaluations.map((evaluation) => (
@@ -226,6 +226,10 @@ export default function StudentPage() {
                           <span className="status-pill status-info">
                             {formatNumber(evaluation.final_score)} / {formatNumber(evaluation.max_marks)}
                           </span>
+                        </div>
+                        <div className="tagline">
+                          <span>{evaluation.attempted ? "Attempted" : "Not attempted"}</span>
+                          <span>{evaluation.counts_toward_total ? "Counts in total" : "Not counted in total"}</span>
                         </div>
                         <p>{evaluation.reason}</p>
                         {evaluation.missing_points.length ? (

@@ -378,6 +378,7 @@ def _exam_from_row(row: dict[str, Any]) -> ExamOut:
         title=row["title"],
         subject=row["subject"],
         total_marks=row["total_marks"],
+        max_questions_to_grade=row.get("max_questions_to_grade"),
         instructions=row["instructions"],
         questions=json_loads(row["questions_json"], []),
         created_at=row["created_at"],
@@ -400,14 +401,18 @@ def _insert_exam(payload: ExamCreate) -> ExamOut:
     with get_db() as conn:
         conn.execute(
             """
-            INSERT INTO exams (id, title, subject, total_marks, instructions, questions_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO exams (
+                id, title, subject, total_marks, max_questions_to_grade,
+                instructions, questions_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 exam_id,
                 payload.title or "Untitled Exam",
                 payload.subject,
                 payload.total_marks,
+                payload.max_questions_to_grade,
                 payload.instructions,
                 json.dumps(questions),
                 created_at,
@@ -418,6 +423,7 @@ def _insert_exam(payload: ExamCreate) -> ExamOut:
         title=payload.title or "Untitled Exam",
         subject=payload.subject,
         total_marks=float(payload.total_marks or 0),
+        max_questions_to_grade=payload.max_questions_to_grade,
         instructions=payload.instructions,
         questions=questions,
         created_at=created_at,
@@ -433,7 +439,7 @@ def create_exam(payload: ExamCreate, _: AuthUser = Depends(require_teacher)) -> 
 async def create_exam_from_schema_image(
     subject: str = Form("General"),
     title: str = Form("Answer Schema"),
-    default_marks: float = Form(10),
+    default_marks: float | None = Form(None),
     file: UploadFile = File(...),
     _: AuthUser = Depends(require_teacher),
 ) -> ExamOut:
@@ -441,8 +447,9 @@ async def create_exam_from_schema_image(
         ensure_openai_ready()
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if default_marks <= 0:
+    if default_marks is not None and default_marks <= 0:
         raise HTTPException(status_code=422, detail="Marks must be greater than zero.")
+    fallback_marks = float(default_marks or 10)
 
     schema_root = settings.upload_dir / "_schemas"
     schema_root.mkdir(parents=True, exist_ok=True)
@@ -456,7 +463,7 @@ async def create_exam_from_schema_image(
             file_path=stored_path,
             subject=subject.strip() or "General",
             title=title.strip() or "Answer Schema",
-            default_marks=float(default_marks),
+            default_marks=fallback_marks,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -467,7 +474,7 @@ async def create_exam_from_schema_image(
         model_answer = str(question.get("model_answer", "")).strip()
         if not text or not model_answer:
             continue
-        max_marks = question.get("max_marks") or default_marks
+        max_marks = _as_positive_float(question.get("max_marks")) or fallback_marks
         questions.append(
             {
                 "id": str(question.get("id") or f"Q{index}").strip() or f"Q{index}",
@@ -489,10 +496,40 @@ async def create_exam_from_schema_image(
             detail="Could not find a question and answer schema in the uploaded image.",
         )
 
+    extracted_total_marks = _as_positive_float(extracted.get("total_marks"))
+    extracted_choice_limit = _as_positive_int(extracted.get("max_questions_to_grade"))
+    choice_rule = str(extracted.get("choice_rule", "")).strip()
+    extracted_instructions = str(extracted.get("instructions") or "").strip()
+    choice_text = " ".join(
+        [
+            choice_rule,
+            extracted_instructions,
+            str(extracted.get("title") or title or ""),
+            " ".join(question["text"] for question in questions),
+        ]
+    )
+    if not extracted_choice_limit:
+        extracted_choice_limit = _infer_choice_limit(choice_text, len(questions))
+    questions, total_marks, max_questions_to_grade = _normalize_schema_questions(
+        questions=questions,
+        total_marks=extracted_total_marks,
+        max_questions_to_grade=extracted_choice_limit,
+        default_marks=fallback_marks,
+    )
+    instructions = "\n".join(
+        part for part in [extracted_instructions, choice_rule] if part
+    ).strip()
+    if max_questions_to_grade:
+        normalized_rule = f"Grading rule: best {max_questions_to_grade} of {len(questions)} questions count."
+        if normalized_rule.lower() not in instructions.lower():
+            instructions = "\n".join(part for part in [instructions, normalized_rule] if part).strip()
+
     payload = ExamCreate(
         title=str(extracted.get("title") or title or "Answer Schema").strip(),
         subject=str(extracted.get("subject") or subject or "General").strip(),
-        instructions=str(extracted.get("instructions") or "").strip(),
+        instructions=instructions,
+        total_marks=total_marks,
+        max_questions_to_grade=max_questions_to_grade,
         questions=questions,
     )
     return _insert_exam(payload)
@@ -607,6 +644,8 @@ def _submission_bundle(submission_id: str) -> SubmissionOut:
             "evaluations": [
                 {
                     **item,
+                    "attempted": bool(item["attempted"]),
+                    "counts_toward_total": bool(item["counts_toward_total"]),
                     "review_required": bool(item["review_required"]),
                     "missing_points": json_loads(item["missing_points_json"], []),
                 }
@@ -651,6 +690,7 @@ def student_portal(user: AuthUser = Depends(require_student)) -> StudentPortalOu
                     e.title,
                     e.subject,
                     e.total_marks AS exam_total_marks,
+                    e.max_questions_to_grade,
                     e.created_at AS exam_created_at
                 FROM submissions s
                 JOIN exams e ON e.id = s.exam_id
@@ -674,6 +714,7 @@ def student_portal(user: AuthUser = Depends(require_student)) -> StudentPortalOu
                     "title": row["title"],
                     "subject": row["subject"],
                     "total_marks": row["exam_total_marks"],
+                    "max_questions_to_grade": row["max_questions_to_grade"],
                     "created_at": row["exam_created_at"],
                 },
                 "student_name": bundle.student_name,
@@ -704,18 +745,188 @@ def _clamp(value: float, min_value: float, max_value: float) -> float:
     return max(min_value, min(value, max_value))
 
 
+NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
+
+def _as_positive_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _as_positive_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _missing_answer_text(answer_text: str) -> bool:
+    normalized = answer_text.strip().lower()
+    if not normalized:
+        return True
+    missing_markers = [
+        "no distinct answer",
+        "no separate answer",
+        "not found",
+        "not visible",
+        "no explicit response",
+    ]
+    return any(marker in normalized for marker in missing_markers)
+
+
+def _infer_choice_limit(text: str, question_count: int) -> int | None:
+    normalized = text.lower()
+    patterns = [
+        r"(?:answer|attempt|solve)\s+(?:any\s+)?(\d+)",
+        r"(?:answer|attempt|solve)\s+(?:any\s+)?(one|two|three|four|five|six|seven|eight|nine|ten)",
+        r"(\d+)\s+(?:out\s+of|of)\s+\d+",
+        r"(one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:out\s+of|of)\s+\w+",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if not match:
+            continue
+        raw = match.group(1)
+        value = int(raw) if raw.isdigit() else NUMBER_WORDS.get(raw)
+        if value and 0 < value <= question_count:
+            return value
+    return None
+
+
+def _infer_choice_limit_from_total(questions: list[dict[str, Any]], total_marks: float | None) -> int | None:
+    if not total_marks:
+        return None
+    running = 0.0
+    for index, mark in enumerate(sorted((float(question["max_marks"]) for question in questions), reverse=True), start=1):
+        running += mark
+        if abs(running - total_marks) < 0.01:
+            return index
+    return None
+
+
+def _normalize_schema_questions(
+    *,
+    questions: list[dict[str, Any]],
+    total_marks: float | None,
+    max_questions_to_grade: int | None,
+    default_marks: float,
+) -> tuple[list[dict[str, Any]], float | None, int | None]:
+    if max_questions_to_grade and max_questions_to_grade > len(questions):
+        max_questions_to_grade = None
+    marks = [float(question["max_marks"]) for question in questions]
+    inferred_choice_limit = _infer_choice_limit_from_total(questions, total_marks)
+    if total_marks and inferred_choice_limit and sum(marks) > total_marks + 0.01:
+        if (
+            not max_questions_to_grade
+            or max_questions_to_grade >= len(questions)
+        ):
+            max_questions_to_grade = inferred_choice_limit
+    if not max_questions_to_grade:
+        max_questions_to_grade = inferred_choice_limit
+
+    if total_marks and max_questions_to_grade:
+        expected_per_question = total_marks / max_questions_to_grade
+        uniform = marks and all(abs(mark - marks[0]) < 0.01 for mark in marks)
+        top_total = sum(sorted(marks, reverse=True)[:max_questions_to_grade])
+        if expected_per_question > 0 and uniform and abs(top_total - total_marks) >= 0.01:
+            suspicious_total_as_question_mark = marks[0] >= total_marks or marks[0] > expected_per_question * 1.5
+            suspicious_default_as_total = abs(marks[0] - default_marks) < 0.01 and default_marks > expected_per_question * 1.5
+            if suspicious_total_as_question_mark or suspicious_default_as_total:
+                for question in questions:
+                    question["max_marks"] = expected_per_question
+                marks = [float(question["max_marks"]) for question in questions]
+
+        matching_expected = sum(1 for mark in marks if abs(mark - expected_per_question) < 0.01)
+        if (
+            expected_per_question > 0
+            and len(marks) >= 3
+            and matching_expected / len(marks) >= 0.7
+        ):
+            for question in questions:
+                mark = float(question["max_marks"])
+                if 0 < mark < expected_per_question:
+                    question["max_marks"] = expected_per_question
+
+    if not total_marks:
+        marks = sorted((float(question["max_marks"]) for question in questions), reverse=True)
+        total_marks = (
+            sum(marks[:max_questions_to_grade])
+            if max_questions_to_grade
+            else sum(marks)
+        )
+
+    return questions, total_marks, max_questions_to_grade
+
+
 def _recalculate_submission(conn: Any, submission_id: str) -> None:
+    exam = row_to_dict(
+        conn.execute(
+            """
+            SELECT e.total_marks, e.max_questions_to_grade
+            FROM submissions s
+            JOIN exams e ON e.id = s.exam_id
+            WHERE s.id = ?
+            """,
+            (submission_id,),
+        ).fetchone()
+    )
     rows = rows_to_dicts(
         conn.execute(
-            "SELECT final_score, max_marks, confidence FROM evaluations WHERE submission_id = ?",
+            """
+            SELECT id, answer_text, attempted, final_score, max_marks, confidence
+            FROM evaluations
+            WHERE submission_id = ?
+            """,
             (submission_id,),
         ).fetchall()
     )
-    total_score = sum(float(row["final_score"]) for row in rows)
-    total_marks = sum(float(row["max_marks"]) for row in rows)
+    selected_ids: set[str]
+    max_questions = exam and exam.get("max_questions_to_grade")
+    if max_questions:
+        candidates = [
+            row
+            for row in rows
+            if row["attempted"] or str(row["answer_text"]).strip() or float(row["final_score"]) > 0
+        ]
+        selected = sorted(
+            candidates,
+            key=lambda row: (float(row["final_score"]), float(row["confidence"])),
+            reverse=True,
+        )[: int(max_questions)]
+        selected_ids = {row["id"] for row in selected}
+        total_score = sum(float(row["final_score"]) for row in selected)
+        total_marks = float(exam["total_marks"]) if exam else sum(float(row["max_marks"]) for row in selected)
+        confidence_rows = selected or candidates or rows
+    else:
+        selected_ids = {row["id"] for row in rows}
+        total_score = sum(float(row["final_score"]) for row in rows)
+        total_marks = sum(float(row["max_marks"]) for row in rows)
+        confidence_rows = rows
     avg_confidence = (
-        sum(float(row["confidence"]) for row in rows) / len(rows) if rows else 0
+        sum(float(row["confidence"]) for row in confidence_rows) / len(confidence_rows)
+        if confidence_rows
+        else 0
     )
+    for row in rows:
+        conn.execute(
+            "UPDATE evaluations SET counts_toward_total = ? WHERE id = ?",
+            (1 if row["id"] in selected_ids else 0, row["id"]),
+        )
     conn.execute(
         """
         UPDATE submissions
@@ -766,22 +977,30 @@ def _run_evaluation(submission_id: str) -> None:
                     continue
                 seen_question_ids.add(question_id)
                 max_marks = float(question["max_marks"])
-                score = _clamp(float(item.get("score", 0)), 0, max_marks)
+                answer_text = str(item.get("answer_text", ""))
+                attempted_raw = item.get("attempted")
+                attempted = bool(attempted_raw) or not _missing_answer_text(answer_text)
+                if not attempted:
+                    answer_text = ""
+                score = _clamp(float(item.get("score", 0)), 0, max_marks) if attempted else 0
                 confidence = _clamp(float(item.get("confidence", 0)), 0, 100)
-                review_required = bool(item.get("review_required")) or confidence < 80
+                review_required = (bool(item.get("review_required")) or confidence < 80) if attempted else False
                 conn.execute(
                     """
                     INSERT INTO evaluations
-                    (id, submission_id, question_id, question_text, answer_text, score, max_marks,
-                     final_score, confidence, review_required, reason, missing_points_json, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, submission_id, question_id, question_text, answer_text, attempted, counts_toward_total,
+                     score, max_marks, final_score, confidence, review_required, reason, missing_points_json,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         new_id("eval"),
                         submission_id,
                         question_id,
                         question["text"],
-                        str(item.get("answer_text", "")),
+                        answer_text,
+                        1 if attempted else 0,
+                        0,
                         score,
                         max_marks,
                         score,
@@ -800,9 +1019,10 @@ def _run_evaluation(submission_id: str) -> None:
                 conn.execute(
                     """
                     INSERT INTO evaluations
-                    (id, submission_id, question_id, question_text, answer_text, score, max_marks,
-                     final_score, confidence, review_required, reason, missing_points_json, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, submission_id, question_id, question_text, answer_text, attempted, counts_toward_total,
+                     score, max_marks, final_score, confidence, review_required, reason, missing_points_json,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         new_id("eval"),
@@ -810,6 +1030,8 @@ def _run_evaluation(submission_id: str) -> None:
                         question_id,
                         question["text"],
                         "",
+                        0,
+                        0,
                         0,
                         max_marks,
                         0,
@@ -924,14 +1146,15 @@ def update_evaluation(
             if payload.review_required is None
             else (1 if payload.review_required else 0)
         )
+        attempted = 1 if current["attempted"] or float(final_score) > 0 else 0
 
         conn.execute(
             """
             UPDATE evaluations
-            SET final_score = ?, reason = ?, review_required = ?, updated_at = ?
+            SET final_score = ?, reason = ?, review_required = ?, attempted = ?, updated_at = ?
             WHERE id = ?
             """,
-            (final_score, reason, review_required, now_iso(), evaluation_id),
+            (final_score, reason, review_required, attempted, now_iso(), evaluation_id),
         )
         _recalculate_submission(conn, current["submission_id"])
         updated = row_to_dict(
@@ -941,6 +1164,8 @@ def update_evaluation(
     return EvaluationOut(
         **{
             **updated,
+            "attempted": bool(updated["attempted"]),
+            "counts_toward_total": bool(updated["counts_toward_total"]),
             "review_required": bool(updated["review_required"]),
             "missing_points": json_loads(updated["missing_points_json"], []),
         }

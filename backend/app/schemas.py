@@ -29,6 +29,7 @@ class ExamCreate(BaseModel):
     subject: str = Field(min_length=1, max_length=120)
     instructions: str = ""
     total_marks: float | None = Field(default=None, gt=0)
+    max_questions_to_grade: int | None = Field(default=None, ge=1)
     questions: list[QuestionIn] = Field(min_length=1)
 
     @field_validator("title", "subject", "instructions")
@@ -41,8 +42,14 @@ class ExamCreate(BaseModel):
         ids = [question.id for question in self.questions]
         if len(ids) != len(set(ids)):
             raise ValueError("Question IDs must be unique.")
+        if self.max_questions_to_grade and self.max_questions_to_grade > len(self.questions):
+            raise ValueError("Questions to grade cannot exceed available questions.")
         if self.total_marks is None:
-            self.total_marks = sum(question.max_marks for question in self.questions)
+            marks = sorted((question.max_marks for question in self.questions), reverse=True)
+            if self.max_questions_to_grade:
+                self.total_marks = sum(marks[: self.max_questions_to_grade])
+            else:
+                self.total_marks = sum(marks)
         return self
 
 
@@ -51,6 +58,7 @@ class ExamOut(BaseModel):
     title: str
     subject: str
     total_marks: float
+    max_questions_to_grade: int | None = None
     instructions: str
     questions: list[QuestionIn]
     created_at: str
@@ -61,6 +69,8 @@ class EvaluationOut(BaseModel):
     question_id: str
     question_text: str
     answer_text: str
+    attempted: bool = False
+    counts_toward_total: bool = True
     score: float
     max_marks: float
     final_score: float
@@ -155,6 +165,7 @@ class StudentExamSummary(BaseModel):
     title: str
     subject: str
     total_marks: float
+    max_questions_to_grade: int | None = None
     created_at: str
 
 

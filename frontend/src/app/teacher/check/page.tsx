@@ -12,7 +12,7 @@ import {
   UploadBox,
   useRequiredSession,
 } from "../../../components/portal";
-import { api, Exam, formatNumber, QueueEntry, Submission } from "../../../lib/bmsitai";
+import { api, Exam, formatNumber, gradingRule, QueueEntry, Submission } from "../../../lib/bmsitai";
 
 export default function TeacherCheckPage() {
   const { session, health, ready, logout } = useRequiredSession("teacher");
@@ -210,7 +210,8 @@ export default function TeacherCheckPage() {
               <div className="agent-banner">
                 <BrainCircuit size={18} />
                 <span>
-                  Selected: <strong>{activeExam.title}</strong> ({formatNumber(activeExam.total_marks)} marks)
+                  Selected: <strong>{activeExam.title}</strong> ({formatNumber(activeExam.total_marks)} marks,{" "}
+                  {gradingRule(activeExam)})
                 </span>
               </div>
             ) : null}

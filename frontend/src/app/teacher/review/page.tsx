@@ -13,7 +13,7 @@ import {
   StatusPill,
   useRequiredSession,
 } from "../../../components/portal";
-import { api, API_URL, Evaluation, Exam, formatNumber, scorePercent, Submission } from "../../../lib/bmsitai";
+import { api, API_URL, Evaluation, Exam, formatNumber, gradingRule, scorePercent, Submission } from "../../../lib/bmsitai";
 
 export default function TeacherReviewPage() {
   const { session, health, ready, logout } = useRequiredSession("teacher");
@@ -28,6 +28,7 @@ export default function TeacherReviewPage() {
     () => submissions.find((submission) => submission.id === activeSubmissionId) ?? submissions[0] ?? null,
     [activeSubmissionId, submissions],
   );
+  const activeExam = useMemo(() => exams.find((exam) => exam.id === activeExamId) ?? null, [activeExamId, exams]);
 
   useEffect(() => {
     if (!session) return;
@@ -249,9 +250,10 @@ export default function TeacherReviewPage() {
                   />
                   <Fact label="Score" value={`${scorePercent(activeSubmission)}%`} />
                   <Fact label="Confidence" value={`${formatNumber(activeSubmission.average_confidence)}%`} />
+                  <Fact label="Rule" value={activeExam ? gradingRule(activeExam) : "Exam rule"} />
                   <Fact
-                    label="Review flags"
-                    value={String(activeSubmission.evaluations.filter((item) => item.review_required).length)}
+                    label="Attempted"
+                    value={String(activeSubmission.evaluations.filter((item) => item.attempted).length)}
                   />
                 </div>
 

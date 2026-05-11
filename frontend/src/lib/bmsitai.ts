@@ -20,6 +20,7 @@ export type Exam = {
   title: string;
   subject: string;
   total_marks: number;
+  max_questions_to_grade: number | null;
   instructions: string;
   questions: Question[];
   created_at: string;
@@ -30,6 +31,8 @@ export type Evaluation = {
   question_id: string;
   question_text: string;
   answer_text: string;
+  attempted: boolean;
+  counts_toward_total: boolean;
   score: number;
   max_marks: number;
   final_score: number;
@@ -78,7 +81,7 @@ export type StudentPortal = {
   force_password_change: boolean;
   submissions: Array<
     Omit<Submission, "exam_id"> & {
-      exam: Pick<Exam, "id" | "title" | "subject" | "total_marks" | "created_at">;
+      exam: Pick<Exam, "id" | "title" | "subject" | "total_marks" | "max_questions_to_grade" | "created_at">;
     }
   >;
 };
@@ -101,6 +104,13 @@ export type DraftQuestion = {
   marking_rules: string;
   keywordsText: string;
 };
+
+export function gradingRule(exam?: Pick<Exam, "max_questions_to_grade" | "questions"> | null) {
+  if (exam?.max_questions_to_grade) {
+    return `Best ${exam.max_questions_to_grade} of ${exam.questions.length}`;
+  }
+  return "All questions";
+}
 
 export async function api<T>(path: string, init?: RequestInit, token?: string): Promise<T> {
   const headers = new Headers(init?.headers);
@@ -188,7 +198,7 @@ export function computeAnalytics(submissions: Submission[]) {
 
   const questionMap = new Map<string, { earned: number; possible: number; attempts: number }>();
   for (const submission of completed) {
-    for (const evaluation of submission.evaluations) {
+    for (const evaluation of submission.evaluations.filter((item) => item.attempted)) {
       const current = questionMap.get(evaluation.question_id) ?? { earned: 0, possible: 0, attempts: 0 };
       current.earned += evaluation.final_score;
       current.possible += evaluation.max_marks;

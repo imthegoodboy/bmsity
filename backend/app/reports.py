@@ -20,13 +20,19 @@ def generate_report(
     styles = getSampleStyleSheet()
     doc = SimpleDocTemplate(str(destination), pagesize=A4, rightMargin=32, leftMargin=32)
 
-    total = sum(float(item["final_score"]) for item in evaluations)
-    max_total = sum(float(item["max_marks"]) for item in evaluations)
+    total = float(submission.get("total_score", 0))
+    max_total = float(submission.get("total_marks", 0))
 
     story: list[Any] = [
         Paragraph("BmsitAi Evaluation Report", styles["Title"]),
         Spacer(1, 12),
         Paragraph(f"Exam: {exam['title']} ({exam['subject']})", styles["Normal"]),
+        Paragraph(
+            f"Rule: grade best {exam['max_questions_to_grade']} attempted question(s)"
+            if exam.get("max_questions_to_grade")
+            else "Rule: grade all questions",
+            styles["Normal"],
+        ),
         Paragraph(
             f"Student: {submission['student_name']}  |  USN: {submission.get('usn', '')}",
             styles["Normal"],
@@ -37,7 +43,12 @@ def generate_report(
 
     table_data: list[list[Any]] = [["Q", "Marks", "Confidence", "Status", "Feedback"]]
     for item in evaluations:
-        status = "Review" if item["review_required"] else "OK"
+        if not item.get("attempted"):
+            status = "Not attempted"
+        elif not item.get("counts_toward_total", True):
+            status = "Not counted"
+        else:
+            status = "Review" if item["review_required"] else "Counted"
         table_data.append(
             [
                 item["question_id"],

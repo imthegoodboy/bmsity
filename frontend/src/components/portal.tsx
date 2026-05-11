@@ -230,6 +230,10 @@ export function EvaluationEditor({
           {formatNumber(evaluation.confidence)}%
         </span>
       </div>
+      <div className="tagline">
+        <span>{evaluation.attempted ? "Attempted" : "Not attempted"}</span>
+        <span>{evaluation.counts_toward_total ? "Counts in total" : "Not counted in total"}</span>
+      </div>
       <div className="grid gap-3 lg:grid-cols-[160px_minmax(0,1fr)_auto]">
         <label>
           <span className="label">Final marks</span>

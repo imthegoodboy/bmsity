@@ -11,7 +11,7 @@ import {
   UploadBox,
   useRequiredSession,
 } from "../../../components/portal";
-import { api, DraftQuestion, emptyDraftQuestion, Exam, formatNumber } from "../../../lib/bmsitai";
+import { api, DraftQuestion, emptyDraftQuestion, Exam, formatNumber, gradingRule } from "../../../lib/bmsitai";
 
 export default function TeacherExamsPage() {
   const { session, health, ready, logout } = useRequiredSession("teacher");
@@ -21,12 +21,12 @@ export default function TeacherExamsPage() {
 
   const [schemaSubject, setSchemaSubject] = useState("");
   const [schemaTitle, setSchemaTitle] = useState("");
-  const [schemaMarks, setSchemaMarks] = useState("");
   const [schemaFile, setSchemaFile] = useState<File | null>(null);
 
   const [manualTitle, setManualTitle] = useState("");
   const [manualSubject, setManualSubject] = useState("");
   const [manualInstructions, setManualInstructions] = useState("");
+  const [manualMaxQuestions, setManualMaxQuestions] = useState("");
   const [manualQuestions, setManualQuestions] = useState<DraftQuestion[]>([]);
   const [draftQuestion, setDraftQuestion] = useState<DraftQuestion>(emptyDraftQuestion);
 
@@ -52,14 +52,12 @@ export default function TeacherExamsPage() {
       const form = new FormData();
       form.append("subject", schemaSubject);
       form.append("title", schemaTitle);
-      form.append("default_marks", schemaMarks);
       form.append("file", schemaFile);
       const exam = await api<Exam>("/schema/extract", { method: "POST", body: form }, session.token);
       setExams((current) => [exam, ...current.filter((item) => item.id !== exam.id)]);
       setSchemaFile(null);
       setSchemaSubject("");
       setSchemaTitle("");
-      setSchemaMarks("");
       setNotice("Answer scheme extracted. You can now check students from the Check page.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Schema extraction failed");
@@ -100,6 +98,7 @@ export default function TeacherExamsPage() {
             title: manualTitle,
             subject: manualSubject,
             instructions: manualInstructions,
+            max_questions_to_grade: manualMaxQuestions ? Number(manualMaxQuestions) : null,
             questions: manualQuestions.map((question) => ({
               id: question.id,
               text: question.text,
@@ -120,6 +119,7 @@ export default function TeacherExamsPage() {
       setManualTitle("");
       setManualSubject("");
       setManualInstructions("");
+      setManualMaxQuestions("");
       setNotice("Exam created. Open Check to assign student answer sheets.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not create exam");
@@ -153,7 +153,7 @@ export default function TeacherExamsPage() {
               <h3>Extract from answer scheme</h3>
               <button
                 className="btn-primary"
-                disabled={!schemaFile || !schemaSubject || !schemaTitle || !schemaMarks || busy === "schema"}
+                disabled={!schemaFile || !schemaSubject || !schemaTitle || busy === "schema"}
                 type="submit"
               >
                 {busy === "schema" ? <Loader2 className="animate-spin" size={16} /> : <SearchCheck size={16} />}
@@ -164,24 +164,10 @@ export default function TeacherExamsPage() {
               <span className="label">Exam name</span>
               <input className="field" onChange={(event) => setSchemaTitle(event.target.value)} required value={schemaTitle} />
             </label>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label>
-                <span className="label">Subject</span>
-                <input className="field" onChange={(event) => setSchemaSubject(event.target.value)} required value={schemaSubject} />
-              </label>
-              <label>
-                <span className="label">Default marks</span>
-                <input
-                  className="field"
-                  min={0.5}
-                  onChange={(event) => setSchemaMarks(event.target.value)}
-                  required
-                  step={0.5}
-                  type="number"
-                  value={schemaMarks}
-                />
-              </label>
-            </div>
+            <label>
+              <span className="label">Subject</span>
+              <input className="field" onChange={(event) => setSchemaSubject(event.target.value)} required value={schemaSubject} />
+            </label>
             <UploadBox
               accept=".pdf,.png,.jpg,.jpeg,.webp"
               icon={<Upload size={22} />}
@@ -209,6 +195,18 @@ export default function TeacherExamsPage() {
             <label>
               <span className="label">Instructions</span>
               <input className="field" onChange={(event) => setManualInstructions(event.target.value)} value={manualInstructions} />
+            </label>
+            <label>
+              <span className="label">Questions to grade, optional</span>
+              <input
+                className="field"
+                max={manualQuestions.length || undefined}
+                min={1}
+                onChange={(event) => setManualMaxQuestions(event.target.value)}
+                placeholder="Example: 4 for best 4 of 8"
+                type="number"
+                value={manualMaxQuestions}
+              />
             </label>
             <div className="rubric-builder">
               <div className="grid gap-3 sm:grid-cols-2">
@@ -295,6 +293,7 @@ export default function TeacherExamsPage() {
                     <th>Exam</th>
                     <th>Subject</th>
                     <th>Questions</th>
+                    <th>Rule</th>
                     <th>Total marks</th>
                   </tr>
                 </thead>
@@ -304,6 +303,7 @@ export default function TeacherExamsPage() {
                       <td>{exam.title}</td>
                       <td>{exam.subject}</td>
                       <td>{exam.questions.length}</td>
+                      <td>{gradingRule(exam)}</td>
                       <td>{formatNumber(exam.total_marks)}</td>
                     </tr>
                   ))}
