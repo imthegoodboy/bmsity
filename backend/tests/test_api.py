@@ -195,7 +195,7 @@ def test_schema_total_marks_overrides_wrong_all_questions_extraction(tmp_path, m
                 {
                     "id": str(index),
                     "text": f"Question {index}",
-                    "max_marks": 5 if index == 5 else 10,
+                    "max_marks": 12 if index == 3 else 5 if index == 5 else 10,
                     "model_answer": f"Model answer {index}",
                     "marking_rules": "",
                     "keywords": [],
@@ -217,6 +217,8 @@ def test_schema_total_marks_overrides_wrong_all_questions_extraction(tmp_path, m
     assert payload["total_marks"] == 40
     assert payload["max_questions_to_grade"] == 4
     assert all(question["max_marks"] == 10 for question in payload["questions"])
+    assert "answer all questions" not in payload["instructions"].lower()
+    assert "best 4 of 8" in payload["instructions"].lower()
 
 
 def test_submission_evaluation_update_and_report(tmp_path, monkeypatch):

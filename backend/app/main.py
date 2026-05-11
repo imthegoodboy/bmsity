@@ -520,6 +520,7 @@ async def create_exam_from_schema_image(
         part for part in [extracted_instructions, choice_rule] if part
     ).strip()
     if max_questions_to_grade:
+        instructions = _remove_conflicting_all_question_claims(instructions)
         normalized_rule = f"Grading rule: best {max_questions_to_grade} of {len(questions)} questions count."
         if normalized_rule.lower() not in instructions.lower():
             instructions = "\n".join(part for part in [instructions, normalized_rule] if part).strip()
@@ -789,6 +790,22 @@ def _missing_answer_text(answer_text: str) -> bool:
     return any(marker in normalized for marker in missing_markers)
 
 
+def _remove_conflicting_all_question_claims(instructions: str) -> str:
+    conflicting_phrases = [
+        "answer all questions",
+        "all listed questions",
+        "all questions are to be answered",
+        "all questions to be answered",
+    ]
+    lines = []
+    for line in instructions.splitlines():
+        lowered = line.lower()
+        if any(phrase in lowered for phrase in conflicting_phrases):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def _infer_choice_limit(text: str, question_count: int) -> int | None:
     normalized = text.lower()
     patterns = [
@@ -811,12 +828,37 @@ def _infer_choice_limit(text: str, question_count: int) -> int | None:
 def _infer_choice_limit_from_total(questions: list[dict[str, Any]], total_marks: float | None) -> int | None:
     if not total_marks:
         return None
+    marks = [float(question["max_marks"]) for question in questions]
     running = 0.0
-    for index, mark in enumerate(sorted((float(question["max_marks"]) for question in questions), reverse=True), start=1):
+    for index, mark in enumerate(sorted(marks, reverse=True), start=1):
         running += mark
         if abs(running - total_marks) < 0.01:
-            return index
+            return index if index < len(marks) else None
+    dominant = _dominant_mark(marks)
+    if not dominant:
+        return None
+    dominant_mark, dominant_count = dominant
+    inferred = total_marks / dominant_mark
+    rounded = round(inferred)
+    if (
+        dominant_mark > 0
+        and dominant_count / len(marks) >= 0.7
+        and abs(inferred - rounded) < 0.01
+        and 0 < rounded < len(marks)
+    ):
+        return rounded
     return None
+
+
+def _dominant_mark(marks: list[float]) -> tuple[float, int] | None:
+    if not marks:
+        return None
+    groups: dict[float, int] = {}
+    for mark in marks:
+        key = round(float(mark), 2)
+        groups[key] = groups.get(key, 0) + 1
+    mark, count = max(groups.items(), key=lambda item: item[1])
+    return mark, count
 
 
 def _normalize_schema_questions(
@@ -829,6 +871,12 @@ def _normalize_schema_questions(
     if max_questions_to_grade and max_questions_to_grade > len(questions):
         max_questions_to_grade = None
     marks = [float(question["max_marks"]) for question in questions]
+    if (
+        max_questions_to_grade
+        and max_questions_to_grade >= len(questions)
+        and (not total_marks or sum(marks) <= total_marks + 0.01)
+    ):
+        max_questions_to_grade = None
     inferred_choice_limit = _infer_choice_limit_from_total(questions, total_marks)
     if total_marks and inferred_choice_limit and sum(marks) > total_marks + 0.01:
         if (
@@ -859,7 +907,8 @@ def _normalize_schema_questions(
         ):
             for question in questions:
                 mark = float(question["max_marks"])
-                if 0 < mark < expected_per_question:
+                near_expected = abs(mark - expected_per_question) / expected_per_question <= 0.25
+                if 0 < mark < expected_per_question or near_expected:
                     question["max_marks"] = expected_per_question
 
     if not total_marks:
@@ -911,6 +960,7 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
         selected_ids = {row["id"] for row in selected}
         total_score = sum(float(row["final_score"]) for row in selected)
         total_marks = float(exam["total_marks"]) if exam else sum(float(row["max_marks"]) for row in selected)
+        total_score = _clamp(total_score, 0, total_marks)
         confidence_rows = selected or candidates or rows
     else:
         selected_ids = {row["id"] for row in rows}
