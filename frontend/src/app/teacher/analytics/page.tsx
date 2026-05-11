@@ -27,7 +27,7 @@ export default function TeacherAnalyticsPage() {
       try {
         const payload = await api<Exam[]>("/exams", undefined, token);
         setExams(payload);
-        setActiveExamId((current) => current || payload[0]?.id || "");
+        setActiveExamId((current) => (payload.some((exam) => exam.id === current) ? current : payload[0]?.id || ""));
       } catch (error) {
         setNotice(error instanceof Error ? error.message : "Could not load exams");
       }

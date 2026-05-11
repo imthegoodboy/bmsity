@@ -102,7 +102,7 @@ export function PortalHeader({
       </div>
       <div className="header-actions">
         <span className={health?.openai_configured ? "status-pill status-good" : "status-pill status-warn"}>
-          {health?.openai_configured ? "OpenAI ready" : "OpenAI key needed"}
+          {health?.openai_configured ? "OpenAI key set" : "OpenAI key needed"}
         </span>
         {mode === "teacher" ? (
           <nav className="header-tabs" aria-label="Teacher sections">
@@ -186,6 +186,9 @@ export function UploadBox({
         accept={accept}
         className="sr-only"
         multiple={multiple}
+        onClick={(event) => {
+          event.currentTarget.value = "";
+        }}
         onChange={(event) => onChange(Array.from(event.target.files ?? []))}
         type="file"
       />

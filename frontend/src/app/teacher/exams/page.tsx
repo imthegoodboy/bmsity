@@ -82,7 +82,7 @@ export default function TeacherExamsPage() {
         max_marks: Math.max(0.5, marks),
       },
     ]);
-    setDraftQuestion(emptyDraftQuestion(manualQuestions.length + 2));
+    setDraftQuestion(emptyDraftQuestion());
     setNotice("");
   }
 

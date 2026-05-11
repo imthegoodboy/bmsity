@@ -26,19 +26,23 @@ export default function StudentPage() {
     () => portal?.submissions.find((submission) => submission.id === activeSubmissionId) ?? portal?.submissions[0] ?? null,
     [activeSubmissionId, portal],
   );
+  const sessionToken = session?.token;
 
   useEffect(() => {
-    if (!session) return;
-    void loadPortal(session.token);
-  }, [session]);
+    if (!sessionToken) return;
+    void loadPortal(sessionToken);
+  }, [sessionToken]);
 
   async function loadPortal(token: string) {
     try {
       const payload = await api<StudentPortal>("/students/me", undefined, token);
       setPortal(payload);
-      setActiveSubmissionId((current) => current || payload.submissions[0]?.id || "");
+      setActiveSubmissionId((current) =>
+        payload.submissions.some((submission) => submission.id === current) ? current : payload.submissions[0]?.id || "",
+      );
       setSession((current) => {
         if (!current) return current;
+        if (current.force_password_change === payload.force_password_change) return current;
         const next = { ...current, force_password_change: payload.force_password_change };
         saveSession(next);
         return next;

@@ -754,15 +754,17 @@ def _run_evaluation(submission_id: str) -> None:
             file_paths=[Path(row["stored_path"]) for row in files],
         )
 
-        question_map = {question["id"]: question for question in exam["questions"]}
+        question_map = {str(question["id"]): question for question in exam["questions"]}
+        seen_question_ids: set[str] = set()
         created_at = now_iso()
         with get_db() as conn:
             conn.execute("DELETE FROM evaluations WHERE submission_id = ?", (submission_id,))
             for item in result.get("questions", []):
                 question_id = str(item.get("question_id", "")).strip()
                 question = question_map.get(question_id)
-                if not question:
+                if not question or question_id in seen_question_ids:
                     continue
+                seen_question_ids.add(question_id)
                 max_marks = float(question["max_marks"])
                 score = _clamp(float(item.get("score", 0)), 0, max_marks)
                 confidence = _clamp(float(item.get("confidence", 0)), 0, 100)
@@ -787,6 +789,34 @@ def _run_evaluation(submission_id: str) -> None:
                         1 if review_required else 0,
                         str(item.get("reason", "")),
                         json.dumps(item.get("missing_points", [])),
+                        created_at,
+                        created_at,
+                    ),
+                )
+            for question_id, question in question_map.items():
+                if question_id in seen_question_ids:
+                    continue
+                max_marks = float(question["max_marks"])
+                conn.execute(
+                    """
+                    INSERT INTO evaluations
+                    (id, submission_id, question_id, question_text, answer_text, score, max_marks,
+                     final_score, confidence, review_required, reason, missing_points_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_id("eval"),
+                        submission_id,
+                        question_id,
+                        question["text"],
+                        "",
+                        0,
+                        max_marks,
+                        0,
+                        0,
+                        1,
+                        "The evaluation agent did not return this question. Teacher review is required before publishing.",
+                        json.dumps(["No AI evaluation was returned for this question."]),
                         created_at,
                         created_at,
                     ),

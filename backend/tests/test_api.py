@@ -185,6 +185,51 @@ def test_submission_evaluation_update_and_report(tmp_path, monkeypatch):
     assert report.headers["content-type"] == "application/pdf"
 
 
+def test_evaluation_backfills_missing_questions_for_review(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    exam = create_exam(client)
+    submission = upload_submission(client, exam["id"])
+
+    def fake_evaluator(**kwargs):
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "questions": [
+                {
+                    "question_id": "Q1",
+                    "answer_text": "Velocity is speed with direction.",
+                    "score": 2,
+                    "max_marks": 2,
+                    "reason": "Correct.",
+                    "missing_points": [],
+                    "confidence": 96,
+                    "review_required": False,
+                }
+            ],
+            "summary": {
+                "overall_feedback": "Question Q2 needs review.",
+                "weak_areas": ["Missing evaluation"],
+            },
+        }
+
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+
+    headers = teacher_headers(client)
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+
+    fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
+    assert fetched["status"] == "completed"
+    assert fetched["total_score"] == 2
+    assert len(fetched["evaluations"]) == 2
+
+    q2 = next(item for item in fetched["evaluations"] if item["question_id"] == "Q2")
+    assert q2["score"] == 0
+    assert q2["final_score"] == 0
+    assert q2["confidence"] == 0
+    assert q2["review_required"] is True
+
+
 def test_missing_openai_key_returns_setup_error(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch)
     main.settings.openai_api_key = ""

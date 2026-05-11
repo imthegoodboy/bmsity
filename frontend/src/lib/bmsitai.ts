@@ -161,7 +161,7 @@ export function statusClass(status?: Submission["status"] | QueueEntry["status"]
   return "status-pill status-info";
 }
 
-export function emptyDraftQuestion(index = 1): DraftQuestion {
+export function emptyDraftQuestion(): DraftQuestion {
   return {
     id: "",
     text: "",

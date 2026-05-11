@@ -37,7 +37,7 @@ export default function TeacherCheckPage() {
       try {
         const payload = await api<Exam[]>("/exams", undefined, token);
         setExams(payload);
-        setActiveExamId((current) => current || payload[0]?.id || "");
+        setActiveExamId((current) => (payload.some((exam) => exam.id === current) ? current : payload[0]?.id || ""));
       } catch (error) {
         setNotice(error instanceof Error ? error.message : "Could not load exams");
       }
@@ -98,10 +98,12 @@ export default function TeacherCheckPage() {
         });
         await api<unknown>(`/submissions/${created.id}/evaluate`, { method: "POST" }, session.token);
 
+        let settled = false;
         for (let attempt = 0; attempt < 120; attempt += 1) {
           await new Promise((resolve) => setTimeout(resolve, 1500));
           const fresh = await api<Submission>(`/submissions/${created.id}`, undefined, session.token);
           if (fresh.status !== "running") {
+            settled = true;
             updateQueue(entry.id, {
               status: fresh.status === "completed" ? "completed" : "failed",
               message:
@@ -111,6 +113,12 @@ export default function TeacherCheckPage() {
             });
             break;
           }
+        }
+        if (!settled) {
+          updateQueue(entry.id, {
+            status: "failed",
+            message: "Evaluation is still running. Open Review after a moment or retry this queue item.",
+          });
         }
       } catch (error) {
         updateQueue(entry.id, {
