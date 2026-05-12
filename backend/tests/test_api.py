@@ -164,6 +164,55 @@ def test_submission_rejects_unsupported_answer_sheet_type(tmp_path, monkeypatch)
     assert "Unsupported answer sheet file" in response.json()["detail"]
 
 
+def test_schema_extract_adds_extension_from_supported_mime_type(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    captured: dict[str, str] = {}
+
+    def fake_schema_extractor(**kwargs):
+        captured["suffix"] = kwargs["schema_paths"][0].suffix
+        return {
+            "title": "Image Upload",
+            "subject": "Computer Science",
+            "instructions": "Answer all questions.",
+            "questions": [
+                {
+                    "id": "Q1",
+                    "text": "Question 1",
+                    "max_marks": 10,
+                    "model_answer": "Model answer",
+                    "marking_rules": "",
+                    "keywords": [],
+                    "parts": [],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(main, "extract_schema_with_openai", fake_schema_extractor)
+    response = client.post(
+        "/schema/extract",
+        data={"subject": "Computer Science", "title": "Image Upload"},
+        files={"file": ("schema", b"fake-image", "image/png")},
+        headers=teacher_headers(client),
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["suffix"] == ".png"
+
+
+def test_submission_rejects_empty_answer_sheet(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    exam = create_exam(client)
+    response = client.post(
+        f"/exams/{exam['id']}/submissions",
+        data={"student_name": "Asha", "usn": "1BM22CS101"},
+        files={"files": ("sheet.png", b"", "image/png")},
+        headers=teacher_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert "empty" in response.json()["detail"].lower()
+
+
 def test_attempt_hints_normalize_common_question_formats():
     assert main._parse_attempt_hints("Q.1(a), question 2(ii); 3b") == ["Q1.a", "Q2.ii", "Q3.b"]
 

@@ -48,6 +48,12 @@ from .settings import settings
 
 SUPPORTED_UPLOAD_EXTENSIONS = {".jpeg", ".jpg", ".pdf", ".png", ".webp"}
 SUPPORTED_UPLOAD_MIME_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
+UPLOAD_EXTENSION_BY_MIME_TYPE = {
+    "application/pdf": ".pdf",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
 
 
 @asynccontextmanager
@@ -680,18 +686,21 @@ async def create_submission(
 
     saved_files: list[tuple[str, str, str, str, int]] = []
     for index, upload in enumerate(files, start=1):
-        original = clean_filename(upload.filename or f"sheet-{index}")
+        original = _ai_storage_filename(upload, f"sheet-{index}")
         stored_name = f"{index:02d}_{uuid.uuid4().hex[:8]}_{original}"
         stored_path = upload_root / stored_name
         with stored_path.open("wb") as file_handle:
             shutil.copyfileobj(upload.file, file_handle)
+        size_bytes = stored_path.stat().st_size
+        if size_bytes <= 0:
+            raise HTTPException(status_code=400, detail="Uploaded answer sheet file is empty.")
         saved_files.append(
             (
                 new_id("file"),
                 original,
                 str(stored_path),
                 upload.content_type or "application/octet-stream",
-                stored_path.stat().st_size,
+                size_bytes,
             )
         )
 
@@ -913,20 +922,39 @@ def _save_uploads(root: Path, uploads: list[UploadFile], fallback_prefix: str) -
     root.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
     for index, upload in enumerate(uploads, start=1):
-        original = clean_filename(upload.filename or f"{fallback_prefix}-{index}")
+        original = _ai_storage_filename(upload, f"{fallback_prefix}-{index}")
         stored_path = root / f"{index:02d}_{uuid.uuid4().hex[:8]}_{original}"
         with stored_path.open("wb") as file_handle:
             shutil.copyfileobj(upload.file, file_handle)
+        if stored_path.stat().st_size <= 0:
+            raise HTTPException(status_code=400, detail=f"Uploaded {fallback_prefix} file is empty.")
         saved.append(stored_path)
     return saved
+
+
+def _upload_content_type(upload: UploadFile, filename: str) -> str:
+    guessed_type, _ = mimetypes.guess_type(filename)
+    return (upload.content_type or guessed_type or "").split(";", 1)[0].strip().lower()
+
+
+def _ai_storage_filename(upload: UploadFile, fallback_name: str) -> str:
+    original = clean_filename(upload.filename or fallback_name) or fallback_name
+    extension = Path(original).suffix.lower()
+    content_type = _upload_content_type(upload, original)
+    if extension in SUPPORTED_UPLOAD_EXTENSIONS:
+        return original
+    fallback_extension = UPLOAD_EXTENSION_BY_MIME_TYPE.get(content_type)
+    if fallback_extension:
+        stem = Path(original).stem or fallback_name
+        return clean_filename(f"{stem}{fallback_extension}")
+    return original
 
 
 def _validate_ai_uploads(uploads: list[UploadFile], label: str) -> None:
     for upload in uploads:
         original = clean_filename(upload.filename or "")
         extension = Path(original).suffix.lower()
-        guessed_type, _ = mimetypes.guess_type(original)
-        content_type = (upload.content_type or guessed_type or "").split(";", 1)[0].strip().lower()
+        content_type = _upload_content_type(upload, original)
         supported_extension = extension in SUPPORTED_UPLOAD_EXTENSIONS
         supported_mime = content_type in SUPPORTED_UPLOAD_MIME_TYPES
         if not supported_extension and not supported_mime:
@@ -1458,8 +1486,7 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
 
     def row_attempted(row: dict[str, Any]) -> bool:
         return (
-            bool(row["attempted"])
-            or not _missing_answer_text(str(row.get("answer_text") or ""))
+            not _missing_answer_text(str(row.get("answer_text") or ""))
             or _as_float(row["final_score"]) > 0
         )
 
@@ -1857,7 +1884,7 @@ def update_evaluation(
             if payload.review_required is None
             else (1 if payload.review_required else 0)
         )
-        attempted = 1 if current["attempted"] or _as_float(final_score) > 0 else 0
+        attempted = 1 if not _missing_answer_text(str(current.get("answer_text") or "")) or _as_float(final_score) > 0 else 0
 
         conn.execute(
             """
