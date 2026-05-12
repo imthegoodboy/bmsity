@@ -222,7 +222,7 @@ export default function TeacherExamsPage() {
                 max={manualQuestions.length || undefined}
                 min={1}
                 onChange={(event) => setManualMaxQuestions(event.target.value)}
-                placeholder="Example: 4 for best 4 of 8"
+                placeholder="Example: 3 for best 3 attempted questions"
                 type="number"
                 value={manualMaxQuestions}
               />

@@ -47,11 +47,22 @@ def _missing_answer_text(answer_text: str) -> bool:
     missing_markers = [
         "no distinct answer",
         "no separate answer",
+        "no answer",
         "not found",
+        "not present",
+        "not attempted",
         "not visible",
+        "did not attempt",
+        "left blank",
+        "nothing written",
+        "no response",
+        "no student answer",
+        "no visible answer",
+        "no visible response",
         "no explicit response",
         "no extracted answer",
         "not answered",
+        "unattempted",
         "blank answer",
     ]
     return any(marker in normalized for marker in missing_markers)

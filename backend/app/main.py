@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import json
 import base64
 import hashlib
 import hmac
+import json
 import math
+import mimetypes
 import re
 import secrets
 import shutil
@@ -43,6 +44,10 @@ from .schemas import (
     StudentPortalOut,
 )
 from .settings import settings
+
+
+SUPPORTED_UPLOAD_EXTENSIONS = {".jpeg", ".jpg", ".pdf", ".png", ".webp"}
+SUPPORTED_UPLOAD_MIME_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
 
 
 @asynccontextmanager
@@ -487,6 +492,8 @@ async def create_exam_from_schema_image(
         uploads.append(file)
     if not uploads:
         raise HTTPException(status_code=400, detail="Upload at least one answer scheme file.")
+    _validate_ai_uploads(uploads, "answer scheme")
+    _validate_ai_uploads(list(question_files or []), "question paper")
 
     schema_root = settings.upload_dir / "_schemas" / uuid.uuid4().hex[:12]
     schema_paths = _save_uploads(schema_root / "answer-scheme", uploads, "answer-scheme")
@@ -578,6 +585,8 @@ async def create_exam_from_schema_image(
     extracted_choice_limit = _as_positive_int(extracted.get("max_questions_to_grade"))
     choice_rule = str(extracted.get("choice_rule", "")).strip()
     extracted_instructions = str(extracted.get("instructions") or "").strip()
+    raw_choice_rules = extracted.get("choice_rules", [])
+    has_structured_choice_rules = _raw_choice_rules_have_structured_choice(raw_choice_rules)
     choice_text = " ".join(
         [
             choice_rule,
@@ -586,24 +595,33 @@ async def create_exam_from_schema_image(
             " ".join(question["text"] for question in questions),
         ]
     )
-    if not extracted_choice_limit:
+    if not extracted_choice_limit and not has_structured_choice_rules:
         extracted_choice_limit = _infer_choice_limit(choice_text, len(questions))
     questions, total_marks, max_questions_to_grade = _normalize_schema_questions(
         questions=questions,
         total_marks=extracted_total_marks,
         max_questions_to_grade=extracted_choice_limit,
         default_marks=fallback_marks,
+        infer_choice_from_total=not has_structured_choice_rules,
     )
     choice_rules = _clean_choice_rules(
-        extracted.get("choice_rules", []),
+        raw_choice_rules,
         questions,
         max_questions_to_grade,
         choice_rule,
     )
+    simple_best_rule = _simple_best_n_rule(choice_rules, questions)
+    if choice_rules:
+        if simple_best_rule:
+            max_questions_to_grade = _as_positive_int(simple_best_rule.get("count")) or max_questions_to_grade
+        else:
+            max_questions_to_grade = None
+        if not total_marks:
+            total_marks = _choice_rules_total_capacity(questions, choice_rules)
     instructions = "\n".join(
         part for part in [extracted_instructions, choice_rule, schema_verifier_warning] if part
     ).strip()
-    if max_questions_to_grade:
+    if max_questions_to_grade and (not choice_rules or simple_best_rule):
         instructions = _remove_conflicting_all_question_claims(instructions)
         normalized_rule = f"Grading rule: best {max_questions_to_grade} of {len(questions)} questions count."
         if normalized_rule.lower() not in instructions.lower():
@@ -646,6 +664,7 @@ async def create_submission(
     exam = _get_exam_or_404(exam_id)
     if not files:
         raise HTTPException(status_code=400, detail="Upload at least one answer sheet file.")
+    _validate_ai_uploads(files, "answer sheet")
     if not student_name.strip():
         raise HTTPException(status_code=422, detail="Student name is required.")
     normalized_usn = normalize_usn(usn)
@@ -902,6 +921,24 @@ def _save_uploads(root: Path, uploads: list[UploadFile], fallback_prefix: str) -
     return saved
 
 
+def _validate_ai_uploads(uploads: list[UploadFile], label: str) -> None:
+    for upload in uploads:
+        original = clean_filename(upload.filename or "")
+        extension = Path(original).suffix.lower()
+        guessed_type, _ = mimetypes.guess_type(original)
+        content_type = (upload.content_type or guessed_type or "").split(";", 1)[0].strip().lower()
+        supported_extension = extension in SUPPORTED_UPLOAD_EXTENSIONS
+        supported_mime = content_type in SUPPORTED_UPLOAD_MIME_TYPES
+        if not supported_extension and not supported_mime:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unsupported {label} file '{original or 'upload'}'. "
+                    "Upload PDF, PNG, JPG, JPEG, or WEBP files."
+                ),
+            )
+
+
 EXPLICIT_QUESTION_REF_RE = re.compile(
     r"\b(?:q(?:uestion)?|ans(?:wer)?)\.?\s*(?:no\.?)?\s*[:#-]?\s*"
     r"(\d{1,3})(?:\s*(?:[\.\-]|\()\s*([a-zA-Z]{1,3}|[ivxIVX]{1,6})\s*\)?)?",
@@ -1102,6 +1139,73 @@ def _clean_choice_rules(
     return rules
 
 
+def _raw_choice_rules_have_structured_choice(raw_rules: Any) -> bool:
+    if not isinstance(raw_rules, list):
+        return False
+    usable_rules = [
+        rule
+        for rule in raw_rules
+        if isinstance(rule, dict) and str(rule.get("type") or "").strip()
+    ]
+    if len(usable_rules) > 1:
+        return True
+    if not usable_rules:
+        return False
+    rule_type = str(usable_rules[0].get("type") or "").strip().lower().replace("-", "_")
+    return rule_type in {"answer_any", "best_n", "section_answer_any", "section_best_n"}
+
+
+def _simple_best_n_rule(
+    choice_rules: list[dict[str, Any]],
+    questions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if len(choice_rules) != 1:
+        return None
+    rule = choice_rules[0]
+    all_question_ids = {str(question["id"]) for question in questions}
+    rule_question_ids = {str(question_id) for question_id in rule.get("question_ids", [])}
+    if (
+        rule.get("type") == "best_n"
+        and _as_positive_int(rule.get("count"))
+        and rule_question_ids == all_question_ids
+    ):
+        return rule
+    return None
+
+
+def _choice_rules_total_capacity(
+    questions: list[dict[str, Any]],
+    choice_rules: list[dict[str, Any]],
+) -> float | None:
+    question_marks = {str(question["id"]): _as_float(question.get("max_marks")) for question in questions}
+    selected_capacity: set[str] = set()
+    for rule in choice_rules:
+        if not isinstance(rule, dict):
+            continue
+        question_ids = [
+            str(question_id)
+            for question_id in rule.get("question_ids", [])
+            if str(question_id) in question_marks
+        ]
+        if not question_ids:
+            continue
+        if rule.get("type") == "best_n":
+            count = _as_positive_int(rule.get("count"))
+            if not count:
+                continue
+            capacity_ids = sorted(
+                question_ids,
+                key=lambda question_id: question_marks[question_id],
+                reverse=True,
+            )[:count]
+            selected_capacity.update(capacity_ids)
+        elif rule.get("type") == "compulsory":
+            selected_capacity.update(question_ids)
+    if not selected_capacity:
+        return None
+    return sum(question_marks[question_id] for question_id in selected_capacity)
+
+
 def _clean_question_parts(
     *,
     parent_id: str,
@@ -1156,11 +1260,22 @@ def _missing_answer_text(answer_text: str) -> bool:
     missing_markers = [
         "no distinct answer",
         "no separate answer",
+        "no answer",
         "not found",
+        "not present",
+        "not attempted",
         "not visible",
+        "did not attempt",
+        "left blank",
+        "nothing written",
+        "no response",
+        "no student answer",
+        "no visible answer",
+        "no visible response",
         "no explicit response",
         "no extracted answer",
         "not answered",
+        "unattempted",
         "blank answer",
     ]
     return any(marker in normalized for marker in missing_markers)
@@ -1243,6 +1358,7 @@ def _normalize_schema_questions(
     total_marks: float | None,
     max_questions_to_grade: int | None,
     default_marks: float,
+    infer_choice_from_total: bool = True,
 ) -> tuple[list[dict[str, Any]], float | None, int | None]:
     if max_questions_to_grade and max_questions_to_grade > len(questions):
         max_questions_to_grade = None
@@ -1253,7 +1369,7 @@ def _normalize_schema_questions(
         and (not total_marks or sum(marks) <= total_marks + 0.01)
     ):
         max_questions_to_grade = None
-    inferred_choice_limit = _infer_choice_limit_from_total(questions, total_marks)
+    inferred_choice_limit = _infer_choice_limit_from_total(questions, total_marks) if infer_choice_from_total else None
     if total_marks and inferred_choice_limit and sum(marks) > total_marks + 0.01:
         if (
             not max_questions_to_grade
@@ -1289,7 +1405,7 @@ def _normalize_schema_questions(
                 if high_outlier or fallback_outlier:
                     question["max_marks"] = expected_per_question
 
-    if not total_marks:
+    if not total_marks and (infer_choice_from_total or max_questions_to_grade):
         marks = sorted((float(question["max_marks"]) for question in questions), reverse=True)
         total_marks = (
             sum(marks[:max_questions_to_grade])
@@ -1436,8 +1552,7 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
 
 def _evaluation_item_attempted(item: dict[str, Any]) -> bool:
     answer_text = str(item.get("answer_text", ""))
-    score = max(_as_float(item.get("score")), _as_float(item.get("final_score")))
-    return not _missing_answer_text(answer_text) or score > 0
+    return not _missing_answer_text(answer_text)
 
 
 def _merge_part_level_evaluations(

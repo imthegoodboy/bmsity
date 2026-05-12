@@ -137,6 +137,33 @@ def test_create_exam_rejects_empty_schema(tmp_path, monkeypatch):
     assert response.status_code == 422
 
 
+def test_schema_extract_rejects_unsupported_upload_type(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    response = client.post(
+        "/schema/extract",
+        data={"subject": "Computer Science", "title": "Bad Upload"},
+        files={"file": ("schema.txt", b"plain text", "text/plain")},
+        headers=teacher_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert "Unsupported answer scheme file" in response.json()["detail"]
+
+
+def test_submission_rejects_unsupported_answer_sheet_type(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    exam = create_exam(client)
+    response = client.post(
+        f"/exams/{exam['id']}/submissions",
+        data={"student_name": "Asha", "usn": "1BM22CS101"},
+        files={"files": ("sheet.txt", b"plain text", "text/plain")},
+        headers=teacher_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert "Unsupported answer sheet file" in response.json()["detail"]
+
+
 def test_attempt_hints_normalize_common_question_formats():
     assert main._parse_attempt_hints("Q.1(a), question 2(ii); 3b") == ["Q1.a", "Q2.ii", "Q3.b"]
 
@@ -404,6 +431,61 @@ def test_schema_verifier_failure_does_not_discard_valid_extraction(tmp_path, mon
     assert "schema verifier could not complete" in payload["instructions"].lower()
 
 
+def test_schema_section_choice_rules_are_not_flattened_to_global_best_n(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+
+    def fake_schema_extractor(**kwargs):
+        return {
+            "title": "Section Paper",
+            "subject": "Computer Vision",
+            "instructions": "Q1 is compulsory. Answer any two from Q2 to Q4.",
+            "total_marks": None,
+            "max_questions_to_grade": None,
+            "choice_rule": "Q1 compulsory; answer any 2 from Q2-Q4.",
+            "choice_rules": [
+                {
+                    "type": "compulsory",
+                    "count": None,
+                    "question_ids": ["Q1"],
+                    "description": "Q1 is compulsory.",
+                },
+                {
+                    "type": "best_n",
+                    "count": 2,
+                    "question_ids": ["Q2", "Q3", "Q4"],
+                    "description": "Answer any two from Q2 to Q4.",
+                },
+            ],
+            "questions": [
+                {
+                    "id": f"Q{index}",
+                    "text": f"Question {index}",
+                    "max_marks": 10,
+                    "model_answer": f"Model answer {index}",
+                    "marking_rules": "",
+                    "keywords": [],
+                    "parts": [],
+                }
+                for index in range(1, 5)
+            ],
+        }
+
+    monkeypatch.setattr(main, "extract_schema_with_openai", fake_schema_extractor)
+    response = client.post(
+        "/schema/extract",
+        data={"subject": "Computer Vision", "title": "Section Paper"},
+        files={"file": ("schema.pdf", b"fake-schema-pdf", "application/pdf")},
+        headers=teacher_headers(client),
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["total_marks"] == 30
+    assert payload["max_questions_to_grade"] is None
+    assert [rule["type"] for rule in payload["choice_rules"]] == ["compulsory", "best_n"]
+    assert "best 3 of 4" not in payload["instructions"].lower()
+
+
 def test_schema_choice_rule_normalizes_total_and_per_question_marks(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch)
 
@@ -632,9 +714,9 @@ def test_agent_placeholder_attempt_is_not_counted_or_reported(tmp_path, monkeypa
                     "question_id": "Q1",
                     "answer_text": "No distinct answer visible.",
                     "attempted": True,
-                    "score": 0,
+                    "score": 1,
                     "max_marks": 2,
-                    "reason": "Agent incorrectly marked this placeholder as attempted.",
+                    "reason": "Agent incorrectly awarded this placeholder.",
                     "missing_points": ["No visible answer"],
                     "confidence": 91,
                     "review_required": False,
