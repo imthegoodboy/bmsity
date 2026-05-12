@@ -4,6 +4,7 @@ import json
 import base64
 import hashlib
 import hmac
+import math
 import re
 import secrets
 import shutil
@@ -499,6 +500,11 @@ async def create_exam_from_schema_image(
             title=title.strip() or "Answer Schema",
             default_marks=fallback_marks,
         )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    schema_verifier_warning = ""
+    try:
         extracted = verify_schema_with_openai(
             schema_paths=schema_paths,
             question_paper_paths=question_paths,
@@ -507,8 +513,12 @@ async def create_exam_from_schema_image(
             title=title.strip() or "Answer Schema",
             default_marks=fallback_marks,
         )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError:
+        schema_verifier_warning = (
+            "Review note: schema verifier could not complete, so this exam was saved "
+            "from the first extraction pass. Please confirm the extracted question rules "
+            "before checking submissions."
+        )
 
     questions: list[dict[str, Any]] = []
     for index, question in enumerate(extracted.get("questions", []), start=1):
@@ -591,7 +601,7 @@ async def create_exam_from_schema_image(
         choice_rule,
     )
     instructions = "\n".join(
-        part for part in [extracted_instructions, choice_rule] if part
+        part for part in [extracted_instructions, choice_rule, schema_verifier_warning] if part
     ).strip()
     if max_questions_to_grade:
         instructions = _remove_conflicting_all_question_claims(instructions)
@@ -633,13 +643,16 @@ async def create_submission(
     files: list[UploadFile] = File(...),
     _: AuthUser = Depends(require_teacher),
 ) -> SubmissionCreated:
-    _get_exam_or_404(exam_id)
+    exam = _get_exam_or_404(exam_id)
     if not files:
         raise HTTPException(status_code=400, detail="Upload at least one answer sheet file.")
     if not student_name.strip():
         raise HTTPException(status_code=422, detail="Student name is required.")
     normalized_usn = normalize_usn(usn)
-    parsed_attempt_hints = _parse_attempt_hints(attempt_hints)
+    parsed_attempt_hints = _parse_attempt_hints(
+        attempt_hints,
+        valid_question_ids=_question_hint_ids(exam["questions"]),
+    )
 
     created_at = now_iso()
     submission_id = new_id("sub")
@@ -832,6 +845,8 @@ def student_portal(user: AuthUser = Depends(require_student)) -> StudentPortalOu
 
 
 def _clamp(value: float, min_value: float, max_value: float) -> float:
+    if not math.isfinite(value):
+        return min_value
     return max(min_value, min(value, max_value))
 
 
@@ -854,22 +869,25 @@ def _as_positive_float(value: Any) -> float | None:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    return number if number > 0 else None
+    return number if math.isfinite(number) and number > 0 else None
 
 
 def _as_positive_int(value: Any) -> int | None:
     try:
-        number = int(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
-    return number if number > 0 else None
+    if not math.isfinite(number) or number <= 0 or not number.is_integer():
+        return None
+    return int(number)
 
 
 def _as_float(value: Any, fallback: float = 0) -> float:
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return fallback
+    return number if math.isfinite(number) else fallback
 
 
 def _save_uploads(root: Path, uploads: list[UploadFile], fallback_prefix: str) -> list[Path]:
@@ -884,26 +902,80 @@ def _save_uploads(root: Path, uploads: list[UploadFile], fallback_prefix: str) -
     return saved
 
 
-def _parse_attempt_hints(value: str) -> list[str]:
+EXPLICIT_QUESTION_REF_RE = re.compile(
+    r"\b(?:q(?:uestion)?|ans(?:wer)?)\.?\s*(?:no\.?)?\s*[:#-]?\s*"
+    r"(\d{1,3})(?:\s*(?:[\.\-]|\()\s*([a-zA-Z]{1,3}|[ivxIVX]{1,6})\s*\)?)?",
+    re.IGNORECASE,
+)
+COMPACT_QUESTION_REF_RE = re.compile(
+    r"^(?:q\.?)?(\d{1,3})(?:[\.\-\(]?([a-zA-Z]{1,3}|[ivxIVX]{1,6})\)?)?$",
+    re.IGNORECASE,
+)
+
+
+def _question_hint_ids(questions: list[dict[str, Any]]) -> list[str]:
+    ids: list[str] = []
+    for question in questions:
+        question_id = str(question.get("id") or "").strip()
+        if question_id:
+            ids.append(question_id)
+        for part in question.get("parts") or []:
+            if isinstance(part, dict):
+                part_id = str(part.get("id") or "").strip()
+                if part_id:
+                    ids.append(part_id)
+    return ids
+
+
+def _parse_attempt_hints(value: str, valid_question_ids: list[str] | None = None) -> list[str]:
     if not value.strip():
         return []
-    chunks = re.split(r"[,;\n]+", value)
-    if len(chunks) == 1:
-        chunks = re.split(r"\s+", value)
     hints: list[str] = []
     seen: set[str] = set()
-    for chunk in chunks:
-        cleaned = re.sub(r"\s+", "", chunk).strip().strip(".")
+
+    valid_lookup: dict[str, str] = {}
+    for question_id in valid_question_ids or []:
+        cleaned_id = str(question_id).strip()
+        if not cleaned_id:
+            continue
+        canonical = _canonical_question_key(cleaned_id)
+        valid_lookup[cleaned_id.upper()] = cleaned_id
+        if canonical:
+            valid_lookup[canonical] = cleaned_id
+
+    def add_hint(raw_hint: str) -> None:
+        canonical = _canonical_question_key(raw_hint)
+        if not canonical or not re.search(r"\d", canonical):
+            return
+        normalized = canonical
+        if valid_lookup:
+            normalized = valid_lookup.get(raw_hint.strip().upper()) or valid_lookup.get(canonical) or ""
+            if not normalized:
+                return
+        dedupe_key = _canonical_question_key(normalized) or normalized.upper()
+        if dedupe_key not in seen:
+            seen.add(dedupe_key)
+            hints.append(normalized)
+
+    consumed: list[tuple[int, int]] = []
+    for match in EXPLICIT_QUESTION_REF_RE.finditer(value):
+        number, part = match.groups()
+        add_hint(f"Q{number}{'.' + part if part else ''}")
+        consumed.append(match.span())
+
+    remainder = list(value)
+    for start, end in consumed:
+        for index in range(start, end):
+            remainder[index] = " "
+    for token in re.split(r"[,;\n/|]+|\s+|\band\b|\bor\b", "".join(remainder), flags=re.IGNORECASE):
+        cleaned = token.strip().strip("().,:;")
         if not cleaned:
             continue
-        if cleaned.isdigit():
-            cleaned = f"Q{cleaned}"
-        if re.fullmatch(r"\d+[A-Za-z]?", cleaned):
-            cleaned = f"Q{cleaned}"
-        normalized = _canonical_question_key(cleaned) or cleaned.upper()
-        if normalized not in seen:
-            seen.add(normalized)
-            hints.append(normalized)
+        match = COMPACT_QUESTION_REF_RE.fullmatch(cleaned)
+        if not match:
+            continue
+        number, part = match.groups()
+        add_hint(f"Q{number}{'.' + part if part else ''}")
     return hints[:40]
 
 

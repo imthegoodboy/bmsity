@@ -141,6 +141,26 @@ def test_attempt_hints_normalize_common_question_formats():
     assert main._parse_attempt_hints("Q.1(a), question 2(ii); 3b") == ["Q1.a", "Q2.ii", "Q3.b"]
 
 
+def test_attempt_hints_accept_free_text_and_filter_to_exam_questions():
+    questions = [
+        {"id": "Q1", "parts": [{"id": "Q1.a"}]},
+        {"id": "Q2", "parts": [{"id": "Q2.ii"}]},
+        {"id": "Q3", "parts": [{"id": "Q3.b"}]},
+    ]
+
+    assert main._parse_attempt_hints(
+        "student solved question 2(ii) Q.1(a) 3b and 40 marks",
+        valid_question_ids=main._question_hint_ids(questions),
+    ) == ["Q2.ii", "Q1.a", "Q3.b"]
+
+
+def test_nonfinite_ai_numbers_fall_back_safely():
+    assert main._as_float("NaN", fallback=7) == 7
+    assert main._as_positive_float("Infinity") is None
+    assert main._as_positive_int("4.0") == 4
+    assert main._clamp(float("nan"), 0, 10) == 0
+
+
 def test_schema_image_creates_exam(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch)
 
@@ -298,6 +318,67 @@ def test_schema_extraction_uses_verifier_repair_pass(tmp_path, monkeypatch):
     assert captured["draft_title"] == "Draft Paper"
     assert payload["title"] == "Verified Paper"
     assert payload["choice_rules"][0]["description"] == "Answer any one question."
+
+
+def test_schema_verifier_failure_does_not_discard_valid_extraction(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+
+    def fake_schema_extractor(**kwargs):
+        return {
+            "title": "Draft Paper",
+            "subject": "Computer Vision",
+            "instructions": "Answer any one question.",
+            "total_marks": 10,
+            "max_questions_to_grade": 1,
+            "choice_rule": "Answer any one question.",
+            "choice_rules": [
+                {
+                    "type": "best_n",
+                    "count": 1,
+                    "question_ids": ["Q1", "Q2"],
+                    "description": "Answer any one question.",
+                }
+            ],
+            "questions": [
+                {
+                    "id": "Q1",
+                    "text": "Question 1",
+                    "max_marks": 10,
+                    "model_answer": "Model answer 1",
+                    "marking_rules": "",
+                    "keywords": [],
+                    "parts": [],
+                },
+                {
+                    "id": "Q2",
+                    "text": "Question 2",
+                    "max_marks": 10,
+                    "model_answer": "Model answer 2",
+                    "marking_rules": "",
+                    "keywords": [],
+                    "parts": [],
+                },
+            ],
+        }
+
+    def failing_schema_verifier(**kwargs):
+        raise RuntimeError("temporary verifier outage")
+
+    monkeypatch.setattr(main, "extract_schema_with_openai", fake_schema_extractor)
+    monkeypatch.setattr(main, "verify_schema_with_openai", failing_schema_verifier)
+    response = client.post(
+        "/schema/extract",
+        data={"subject": "Computer Vision", "title": "Verifier Fallback"},
+        files={"file": ("schema.pdf", b"fake-schema-pdf", "application/pdf")},
+        headers=teacher_headers(client),
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["title"] == "Draft Paper"
+    assert payload["total_marks"] == 10
+    assert payload["max_questions_to_grade"] == 1
+    assert "schema verifier could not complete" in payload["instructions"].lower()
 
 
 def test_schema_choice_rule_normalizes_total_and_per_question_marks(tmp_path, monkeypatch):

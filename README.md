@@ -152,8 +152,8 @@ Old exams keep old extracted data. If you improve extraction logic, upload the s
 Backend tests:
 
 ```powershell
-cd C:\Users\parth\Desktop\bmsityi\backend
-.\.venv\Scripts\python -m pytest
+cd C:\Users\parth\Desktop\bmsityi
+pytest -q
 ```
 
 Frontend checks:
