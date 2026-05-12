@@ -105,6 +105,7 @@ export default function StudentPage() {
   if (!ready || !session) return <LoadingScreen />;
 
   const mustChangePassword = session.force_password_change || portal?.force_password_change;
+  const attemptedEvaluations = activeSubmission?.evaluations.filter((item) => item.attempted) ?? [];
 
   return (
     <main className="min-h-screen">
@@ -213,34 +214,38 @@ export default function StudentPage() {
                     />
                     <Fact label="Score" value={`${scorePercent(activeSubmission)}%`} />
                     <Fact label="Confidence" value={`${formatNumber(activeSubmission.average_confidence)}%`} />
-                    <Fact label="Attempted" value={String(activeSubmission.evaluations.filter((item) => item.attempted).length)} />
+                    <Fact label="Attempted" value={String(attemptedEvaluations.length)} />
                   </div>
                   <div className="evaluation-stack">
-                    {activeSubmission.evaluations.map((evaluation) => (
-                      <article className="evaluation-card" key={evaluation.id}>
-                        <div className="evaluation-top">
-                          <div>
-                            <p className="eyebrow">{evaluation.question_id}</p>
-                            <h3>{evaluation.question_text}</h3>
+                    {attemptedEvaluations.length ? (
+                      attemptedEvaluations.map((evaluation) => (
+                        <article className="evaluation-card" key={evaluation.id}>
+                          <div className="evaluation-top">
+                            <div>
+                              <p className="eyebrow">{evaluation.question_id}</p>
+                              <h3>{evaluation.question_text}</h3>
+                            </div>
+                            <span className="status-pill status-info">
+                              {formatNumber(evaluation.final_score)} / {formatNumber(evaluation.max_marks)}
+                            </span>
                           </div>
-                          <span className="status-pill status-info">
-                            {formatNumber(evaluation.final_score)} / {formatNumber(evaluation.max_marks)}
-                          </span>
-                        </div>
-                        <div className="tagline">
-                          <span>{evaluation.attempted ? "Attempted" : "Not attempted"}</span>
-                          <span>{evaluation.counts_toward_total ? "Counts in total" : "Not counted in total"}</span>
-                        </div>
-                        <p>{evaluation.reason}</p>
-                        {evaluation.missing_points.length ? (
                           <div className="tagline">
-                            {evaluation.missing_points.map((point) => (
-                              <span key={point}>{point}</span>
-                            ))}
+                            <span>{evaluation.counts_toward_total ? "Counts in total" : "Extra attempted"}</span>
+                            {evaluation.review_required ? <span>Teacher review advised</span> : null}
                           </div>
-                        ) : null}
-                      </article>
-                    ))}
+                          <p>{evaluation.reason}</p>
+                          {evaluation.missing_points.length ? (
+                            <div className="tagline">
+                              {evaluation.missing_points.map((point) => (
+                                <span key={point}>{point}</span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </article>
+                      ))
+                    ) : (
+                      <EmptyState text="No attempted questions were detected in this report." />
+                    )}
                   </div>
                 </>
               ) : (

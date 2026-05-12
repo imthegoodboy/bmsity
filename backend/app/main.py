@@ -28,7 +28,7 @@ from .ai import (
     verify_schema_with_openai,
 )
 from .database import get_db, init_db, json_loads, row_to_dict, rows_to_dicts
-from .reports import generate_report
+from .reports import generate_report, reportable_evaluations
 from .schemas import (
     EvaluationOut,
     EvaluationUpdate,
@@ -1769,7 +1769,7 @@ def export_report(
     if user.role == "student" and not submission.published:
         raise HTTPException(status_code=403, detail="This result has not been published yet.")
     exam = _get_exam_or_404(submission.exam_id)
-    evaluations = [item.model_dump() for item in submission.evaluations]
+    evaluations = reportable_evaluations([item.model_dump() for item in submission.evaluations])
     destination = settings.report_dir / f"{submission_id}.pdf"
     generate_report(
         destination=destination,

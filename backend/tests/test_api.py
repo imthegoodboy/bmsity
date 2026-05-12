@@ -580,6 +580,20 @@ def test_evaluation_backfills_missing_questions_for_review(tmp_path, monkeypatch
     assert q2["confidence"] == 0
     assert q2["review_required"] is True
 
+    captured: dict[str, list[str]] = {}
+
+    def fake_generate_report(**kwargs):
+        captured["question_ids"] = [item["question_id"] for item in kwargs["evaluations"]]
+        destination = kwargs["destination"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"%PDF-1.4\n%%EOF")
+        return destination
+
+    monkeypatch.setattr(main, "generate_report", fake_generate_report)
+    report = client.get(f"/submissions/{submission['id']}/report", headers=headers)
+    assert report.status_code == 200
+    assert captured["question_ids"] == ["Q1"]
+
 
 def test_choice_exam_scores_best_attempted_questions_only(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch)

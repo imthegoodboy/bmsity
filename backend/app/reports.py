@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -30,6 +31,34 @@ def _rule_text(exam: dict[str, Any]) -> str:
     return "Rule: grade all questions"
 
 
+def _as_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_attempted(item: dict[str, Any]) -> bool:
+    return bool(item.get("attempted")) or _as_float(item.get("final_score")) > 0
+
+
+def reportable_evaluations(evaluations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item for item in evaluations if _is_attempted(item)]
+
+
+def _feedback_text(item: dict[str, Any]) -> str:
+    reason = str(item.get("reason") or "").strip()
+    missing_points = [
+        str(point).strip()
+        for point in item.get("missing_points", [])
+        if str(point).strip()
+    ]
+    if missing_points:
+        missing = "Missing: " + "; ".join(missing_points)
+        return "<br/>".join(escape(part) for part in [reason, missing] if part)
+    return escape(reason or "No written feedback was returned for this attempted answer.")
+
+
 def generate_report(
     *,
     destination: Path,
@@ -43,6 +72,7 @@ def generate_report(
 
     total = float(submission.get("total_score", 0))
     max_total = float(submission.get("total_marks", 0))
+    visible_evaluations = reportable_evaluations(evaluations)
 
     story: list[Any] = [
         Paragraph("BmsitAi Evaluation Report", styles["Title"]),
@@ -54,41 +84,48 @@ def generate_report(
             styles["Normal"],
         ),
         Paragraph(f"Total: {total:g} / {max_total:g}", styles["Heading2"]),
+        Paragraph(f"Attempted answers shown: {len(visible_evaluations)}", styles["Normal"]),
         Spacer(1, 12),
     ]
 
-    table_data: list[list[Any]] = [["Q", "Marks", "Confidence", "Status", "Feedback"]]
-    for item in evaluations:
-        if not item.get("attempted"):
-            status = "Not attempted"
-        elif not item.get("counts_toward_total", True):
-            status = "Not counted"
-        else:
-            status = "Review" if item["review_required"] else "Counted"
-        table_data.append(
-            [
-                item["question_id"],
-                f"{float(item['final_score']):g}/{float(item['max_marks']):g}",
-                f"{float(item['confidence']):g}%",
-                status,
-                Paragraph(item["reason"], styles["BodyText"]),
-            ]
-        )
+    if visible_evaluations:
+        table_data: list[list[Any]] = [["Q", "Marks", "Confidence", "Status", "Feedback"]]
+        for item in visible_evaluations:
+            if not item.get("counts_toward_total", True):
+                status = "Not counted"
+            else:
+                status = "Review" if item["review_required"] else "Counted"
+            table_data.append(
+                [
+                    item["question_id"],
+                    f"{float(item['final_score']):g}/{float(item['max_marks']):g}",
+                    f"{float(item['confidence']):g}%",
+                    status,
+                    Paragraph(_feedback_text(item), styles["BodyText"]),
+                ]
+            )
 
-    table = Table(table_data, colWidths=[42, 58, 76, 62, 300])
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dbeafe")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#bfdbfe")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fbff")]),
-            ]
+        table = Table(table_data, colWidths=[42, 58, 76, 62, 300])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dbeafe")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#bfdbfe")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fbff")]),
+                ]
+            )
         )
-    )
-    story.append(table)
+        story.append(table)
+    else:
+        story.append(
+            Paragraph(
+                "No attempted answers were detected for this submission.",
+                styles["BodyText"],
+            )
+        )
 
     if submission.get("overall_feedback"):
         story.extend(
