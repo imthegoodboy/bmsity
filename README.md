@@ -5,7 +5,7 @@ BMSIT&M-branded AI answer sheet evaluation portal for teachers and students.
 ## What It Does
 
 - Teachers create exams from uploaded question paper pages plus solution-scheme pages, or from a manual rubric.
-- The blueprint agent reads question numbers, subparts, per-question marks, total marks, and choice rules such as "best 4 of 8" without hardcoding one paper pattern.
+- The blueprint agent reads question numbers, subparts, per-question marks, total marks, and structured choice rules such as "best 4 of 8" or "Q1 compulsory, answer any 2 from Q2-Q4" without hardcoding one paper pattern.
 - Teachers upload student answer sheets as PDFs or images.
 - The evaluation agent detects which questions and subparts the student attempted, extracts the written answer, grades against the matching rubric, and a verifier agent re-checks the marks before the backend applies the allowed-question rule.
 - Teachers review marks, edit final scores, re-check, publish, and export PDFs.
@@ -133,6 +133,7 @@ The system is not hardcoded for one paper. It stores the exam rule extracted fro
 
 - all questions compulsory
 - best N of M questions
+- mixed compulsory plus optional groups
 - nested parts such as Q1(a), Q1(b), Q2(i), and Q2(ii)
 - mixed per-question marks
 - subpart marks summed into a question total

@@ -78,6 +78,37 @@ def choice_exam_payload() -> dict:
     }
 
 
+def section_choice_exam_payload() -> dict:
+    return {
+        "title": "Section Choice Test",
+        "subject": "Computer Vision",
+        "total_marks": 30,
+        "choice_rules": [
+            {
+                "type": "compulsory",
+                "count": None,
+                "question_ids": ["Q1"],
+                "description": "Q1 is compulsory.",
+            },
+            {
+                "type": "best_n",
+                "count": 2,
+                "question_ids": ["Q2", "Q3", "Q4"],
+                "description": "Answer any two from Q2 to Q4.",
+            },
+        ],
+        "questions": [
+            {
+                "id": f"Q{index}",
+                "text": f"Question {index}",
+                "max_marks": 10,
+                "model_answer": f"Model answer {index}",
+            }
+            for index in range(1, 5)
+        ],
+    }
+
+
 def create_exam(client: TestClient) -> dict:
     response = client.post("/exams", json=exam_payload(), headers=teacher_headers(client))
     assert response.status_code == 200, response.text
@@ -257,6 +288,14 @@ def test_schema_total_marks_overrides_wrong_all_questions_extraction(tmp_path, m
             "total_marks": 40,
             "max_questions_to_grade": 8,
             "choice_rule": "Answer all questions",
+            "choice_rules": [
+                {
+                    "type": "compulsory",
+                    "count": None,
+                    "question_ids": [str(index) for index in range(1, 9)],
+                    "description": "Answer all questions",
+                }
+            ],
             "questions": [
                 {
                     "id": str(index),
@@ -282,6 +321,7 @@ def test_schema_total_marks_overrides_wrong_all_questions_extraction(tmp_path, m
     payload = response.json()
     assert payload["total_marks"] == 40
     assert payload["max_questions_to_grade"] == 4
+    assert payload["choice_rules"][0]["type"] == "best_n"
     assert all(question["max_marks"] == 10 for question in payload["questions"])
     assert "answer all questions" not in payload["instructions"].lower()
     assert "best 4 of 8" in payload["instructions"].lower()
@@ -442,6 +482,126 @@ def test_choice_exam_scores_best_attempted_questions_only(tmp_path, monkeypatch)
     assert next(item for item in fetched["evaluations"] if item["question_id"] == "Q4")["attempted"] is True
     assert next(item for item in fetched["evaluations"] if item["question_id"] == "Q4")["counts_toward_total"] is False
     assert next(item for item in fetched["evaluations"] if item["question_id"] == "Q8")["attempted"] is False
+
+
+def test_section_choice_rules_count_compulsory_and_best_group(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    headers = teacher_headers(client)
+    exam_response = client.post("/exams", json=section_choice_exam_payload(), headers=headers)
+    assert exam_response.status_code == 200, exam_response.text
+    exam = exam_response.json()
+    submission = upload_submission(client, exam["id"])
+
+    def fake_evaluator(**kwargs):
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "questions": [
+                {
+                    "question_id": f"Q{index}",
+                    "answer_text": f"Student answer {index}",
+                    "attempted": True,
+                    "score": score,
+                    "max_marks": 10,
+                    "reason": "Checked.",
+                    "missing_points": [],
+                    "confidence": 90,
+                    "review_required": False,
+                }
+                for index, score in enumerate([6, 7, 9, 4], start=1)
+            ],
+            "summary": {"overall_feedback": "Section rules applied.", "weak_areas": []},
+        }
+
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+
+    fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
+    assert fetched["total_score"] == 22
+    assert fetched["total_marks"] == 30
+    counted = {item["question_id"] for item in fetched["evaluations"] if item["counts_toward_total"]}
+    assert counted == {"Q1", "Q2", "Q3"}
+
+
+def test_part_level_evaluator_output_rolls_up_to_parent_question(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    headers = teacher_headers(client)
+    exam_response = client.post(
+        "/exams",
+        json={
+            "title": "Part Test",
+            "subject": "Computer Vision",
+            "questions": [
+                {
+                    "id": "Q1",
+                    "text": "Answer both subparts.",
+                    "max_marks": 10,
+                    "model_answer": "Use part rubrics.",
+                    "parts": [
+                        {
+                            "id": "Q1.a",
+                            "label": "a",
+                            "text": "Part a",
+                            "max_marks": 5,
+                            "model_answer": "Answer a",
+                        },
+                        {
+                            "id": "Q1.b",
+                            "label": "b",
+                            "text": "Part b",
+                            "max_marks": 5,
+                            "model_answer": "Answer b",
+                        },
+                    ],
+                }
+            ],
+        },
+        headers=headers,
+    )
+    assert exam_response.status_code == 200, exam_response.text
+    submission = upload_submission(client, exam_response.json()["id"])
+
+    def fake_evaluator(**kwargs):
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "questions": [
+                {
+                    "question_id": "Q1.a",
+                    "answer_text": "Student answer for part a.",
+                    "attempted": True,
+                    "score": 4,
+                    "max_marks": 5,
+                    "reason": "Part a mostly correct.",
+                    "missing_points": [],
+                    "confidence": 92,
+                    "review_required": False,
+                },
+                {
+                    "question_id": "Q1.b",
+                    "answer_text": "Student answer for part b.",
+                    "attempted": True,
+                    "score": 3,
+                    "max_marks": 5,
+                    "reason": "Part b partially correct.",
+                    "missing_points": ["Missing example"],
+                    "confidence": 88,
+                    "review_required": False,
+                },
+            ],
+            "summary": {"overall_feedback": "Parts merged.", "weak_areas": []},
+        }
+
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+    fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
+    q1 = fetched["evaluations"][0]
+    assert q1["question_id"] == "Q1"
+    assert q1["final_score"] == 7
+    assert "Q1.a" in q1["answer_text"]
+    assert "Q1.b: Missing example" in q1["missing_points"]
 
 
 def test_missing_openai_key_returns_setup_error(tmp_path, monkeypatch):

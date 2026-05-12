@@ -41,6 +41,7 @@ def init_db(path: Path | None = None) -> None:
                 subject TEXT NOT NULL,
                 total_marks REAL NOT NULL,
                 max_questions_to_grade INTEGER,
+                choice_rules_json TEXT NOT NULL DEFAULT '[]',
                 instructions TEXT NOT NULL DEFAULT '',
                 questions_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
@@ -124,6 +125,8 @@ def init_db(path: Path | None = None) -> None:
         }
         if "max_questions_to_grade" not in exam_columns:
             conn.execute("ALTER TABLE exams ADD COLUMN max_questions_to_grade INTEGER")
+        if "choice_rules_json" not in exam_columns:
+            conn.execute("ALTER TABLE exams ADD COLUMN choice_rules_json TEXT NOT NULL DEFAULT '[]'")
         evaluation_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(evaluations)").fetchall()

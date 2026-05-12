@@ -17,12 +17,20 @@ export type Question = {
   parts?: Question[];
 };
 
+export type ChoiceRule = {
+  type: string;
+  count: number | null;
+  question_ids: string[];
+  description: string;
+};
+
 export type Exam = {
   id: string;
   title: string;
   subject: string;
   total_marks: number;
   max_questions_to_grade: number | null;
+  choice_rules: ChoiceRule[];
   instructions: string;
   questions: Question[];
   created_at: string;
@@ -87,7 +95,7 @@ export type StudentPortal = {
   force_password_change: boolean;
   submissions: Array<
     Omit<Submission, "exam_id"> & {
-      exam: Pick<Exam, "id" | "title" | "subject" | "total_marks" | "max_questions_to_grade" | "created_at">;
+      exam: Pick<Exam, "id" | "title" | "subject" | "total_marks" | "max_questions_to_grade" | "choice_rules" | "created_at">;
     }
   >;
 };
@@ -112,7 +120,17 @@ export type DraftQuestion = {
   keywordsText: string;
 };
 
-export function gradingRule(exam?: Pick<Exam, "max_questions_to_grade" | "questions"> | null) {
+export function gradingRule(exam?: Pick<Exam, "max_questions_to_grade" | "questions" | "choice_rules"> | null) {
+  if (exam?.choice_rules?.length) {
+    return exam.choice_rules
+      .map((rule) => {
+        if (rule.description) return rule.description;
+        if (rule.type === "best_n" && rule.count) return `Best ${rule.count} of ${rule.question_ids.length}`;
+        if (rule.type === "compulsory") return `${rule.question_ids.length} compulsory`;
+        return "Choice rule";
+      })
+      .join("; ");
+  }
   if (exam?.max_questions_to_grade) {
     return `Best ${exam.max_questions_to_grade} of ${exam.questions.length}`;
   }

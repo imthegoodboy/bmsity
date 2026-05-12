@@ -9,6 +9,27 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
+def _rule_text(exam: dict[str, Any]) -> str:
+    choice_rules = exam.get("choice_rules") or []
+    if choice_rules:
+        parts: list[str] = []
+        for rule in choice_rules:
+            if not isinstance(rule, dict):
+                continue
+            description = str(rule.get("description") or "").strip()
+            if description:
+                parts.append(description)
+            elif rule.get("type") == "best_n" and rule.get("count"):
+                parts.append(f"best {rule['count']} of {len(rule.get('question_ids', []))}")
+            elif rule.get("type") == "compulsory":
+                parts.append(f"{len(rule.get('question_ids', []))} compulsory question(s)")
+        if parts:
+            return "Rule: " + "; ".join(parts)
+    if exam.get("max_questions_to_grade"):
+        return f"Rule: grade best {exam['max_questions_to_grade']} attempted question(s)"
+    return "Rule: grade all questions"
+
+
 def generate_report(
     *,
     destination: Path,
@@ -27,12 +48,7 @@ def generate_report(
         Paragraph("BmsitAi Evaluation Report", styles["Title"]),
         Spacer(1, 12),
         Paragraph(f"Exam: {exam['title']} ({exam['subject']})", styles["Normal"]),
-        Paragraph(
-            f"Rule: grade best {exam['max_questions_to_grade']} attempted question(s)"
-            if exam.get("max_questions_to_grade")
-            else "Rule: grade all questions",
-            styles["Normal"],
-        ),
+        Paragraph(_rule_text(exam), styles["Normal"]),
         Paragraph(
             f"Student: {submission['student_name']}  |  USN: {submission.get('usn', '')}",
             styles["Normal"],

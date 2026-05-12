@@ -57,12 +57,37 @@ class QuestionIn(BaseModel):
         return cleaned
 
 
+class ChoiceRuleIn(BaseModel):
+    type: str = Field(default="best_n", max_length=40)
+    count: int | None = Field(default=None, ge=1)
+    question_ids: list[str] = Field(default_factory=list)
+    description: str = ""
+
+    @field_validator("type", "description")
+    @classmethod
+    def strip_rule_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("question_ids")
+    @classmethod
+    def clean_question_ids(cls, value: list[str]) -> list[str]:
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for item in value:
+            normalized = item.strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                cleaned.append(normalized)
+        return cleaned
+
+
 class ExamCreate(BaseModel):
     title: str = Field(default="Untitled Exam", max_length=120)
     subject: str = Field(min_length=1, max_length=120)
     instructions: str = ""
     total_marks: float | None = Field(default=None, gt=0)
     max_questions_to_grade: int | None = Field(default=None, ge=1)
+    choice_rules: list[ChoiceRuleIn] = Field(default_factory=list)
     questions: list[QuestionIn] = Field(min_length=1)
 
     @field_validator("title", "subject", "instructions")
@@ -92,6 +117,7 @@ class ExamOut(BaseModel):
     subject: str
     total_marks: float
     max_questions_to_grade: int | None = None
+    choice_rules: list[ChoiceRuleIn] = Field(default_factory=list)
     instructions: str
     questions: list[QuestionIn]
     created_at: str
@@ -200,6 +226,7 @@ class StudentExamSummary(BaseModel):
     subject: str
     total_marks: float
     max_questions_to_grade: int | None = None
+    choice_rules: list[ChoiceRuleIn] = Field(default_factory=list)
     created_at: str
 
 

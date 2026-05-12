@@ -396,6 +396,7 @@ def _exam_from_row(row: dict[str, Any]) -> ExamOut:
         subject=row["subject"],
         total_marks=row["total_marks"],
         max_questions_to_grade=row.get("max_questions_to_grade"),
+        choice_rules=json_loads(row.get("choice_rules_json", "[]"), []),
         instructions=row["instructions"],
         questions=json_loads(row["questions_json"], []),
         created_at=row["created_at"],
@@ -408,6 +409,7 @@ def _get_exam_or_404(exam_id: str) -> dict[str, Any]:
     if not row:
         raise HTTPException(status_code=404, detail="Exam not found.")
     row["questions"] = json_loads(row["questions_json"], [])
+    row["choice_rules"] = json_loads(row.get("choice_rules_json", "[]"), [])
     return row
 
 
@@ -415,14 +417,20 @@ def _insert_exam(payload: ExamCreate) -> ExamOut:
     exam_id = new_id("exam")
     created_at = now_iso()
     questions = [question.model_dump() for question in payload.questions]
+    choice_rules = [rule.model_dump() for rule in payload.choice_rules] or _clean_choice_rules(
+        [],
+        questions,
+        payload.max_questions_to_grade,
+        payload.instructions,
+    )
     with get_db() as conn:
         conn.execute(
             """
             INSERT INTO exams (
                 id, title, subject, total_marks, max_questions_to_grade,
-                instructions, questions_json, created_at
+                choice_rules_json, instructions, questions_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 exam_id,
@@ -430,6 +438,7 @@ def _insert_exam(payload: ExamCreate) -> ExamOut:
                 payload.subject,
                 payload.total_marks,
                 payload.max_questions_to_grade,
+                json.dumps(choice_rules),
                 payload.instructions,
                 json.dumps(questions),
                 created_at,
@@ -441,6 +450,7 @@ def _insert_exam(payload: ExamCreate) -> ExamOut:
         subject=payload.subject,
         total_marks=float(payload.total_marks or 0),
         max_questions_to_grade=payload.max_questions_to_grade,
+        choice_rules=choice_rules,
         instructions=payload.instructions,
         questions=questions,
         created_at=created_at,
@@ -565,6 +575,12 @@ async def create_exam_from_schema_image(
         max_questions_to_grade=extracted_choice_limit,
         default_marks=fallback_marks,
     )
+    choice_rules = _clean_choice_rules(
+        extracted.get("choice_rules", []),
+        questions,
+        max_questions_to_grade,
+        choice_rule,
+    )
     instructions = "\n".join(
         part for part in [extracted_instructions, choice_rule] if part
     ).strip()
@@ -580,6 +596,7 @@ async def create_exam_from_schema_image(
         instructions=instructions,
         total_marks=total_marks,
         max_questions_to_grade=max_questions_to_grade,
+        choice_rules=choice_rules,
         questions=questions,
     )
     return _insert_exam(payload)
@@ -692,7 +709,7 @@ def _submission_bundle(submission_id: str) -> SubmissionOut:
         )
         evaluations = rows_to_dicts(
             conn.execute(
-                "SELECT * FROM evaluations WHERE submission_id = ? ORDER BY question_id",
+                "SELECT * FROM evaluations WHERE submission_id = ? ORDER BY rowid",
                 (submission_id,),
             ).fetchall()
         )
@@ -753,6 +770,7 @@ def student_portal(user: AuthUser = Depends(require_student)) -> StudentPortalOu
                     e.subject,
                     e.total_marks AS exam_total_marks,
                     e.max_questions_to_grade,
+                    e.choice_rules_json,
                     e.created_at AS exam_created_at
                 FROM submissions s
                 JOIN exams e ON e.id = s.exam_id
@@ -777,6 +795,7 @@ def student_portal(user: AuthUser = Depends(require_student)) -> StudentPortalOu
                     "subject": row["subject"],
                     "total_marks": row["exam_total_marks"],
                     "max_questions_to_grade": row["max_questions_to_grade"],
+                    "choice_rules": json_loads(row.get("choice_rules_json", "[]"), []),
                     "created_at": row["exam_created_at"],
                 },
                 "student_name": bundle.student_name,
@@ -837,6 +856,13 @@ def _as_positive_int(value: Any) -> int | None:
     return number if number > 0 else None
 
 
+def _as_float(value: Any, fallback: float = 0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
 def _save_uploads(root: Path, uploads: list[UploadFile], fallback_prefix: str) -> list[Path]:
     root.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
@@ -865,11 +891,127 @@ def _parse_attempt_hints(value: str) -> list[str]:
             cleaned = f"Q{cleaned}"
         if re.fullmatch(r"\d+[A-Za-z]?", cleaned):
             cleaned = f"Q{cleaned}"
-        normalized = cleaned.upper()
+        normalized = _canonical_question_key(cleaned) or cleaned.upper()
         if normalized not in seen:
             seen.add(normalized)
             hints.append(normalized)
     return hints[:40]
+
+
+def _canonical_question_key(value: Any) -> str:
+    text = re.sub(r"\s+", "", str(value or "").strip()).upper()
+    text = text.replace("QUESTION", "Q").replace("ANSWER", "").replace("ANS", "")
+    text = text.strip(":.")
+    if not text:
+        return ""
+    match = re.fullmatch(r"Q?(\d+)$", text)
+    if match:
+        return f"Q{match.group(1)}"
+    match = re.fullmatch(r"Q?(\d+)[\.\-\(]?([A-Z]+|[IVX]+)\)?", text)
+    if match:
+        return f"Q{match.group(1)}.{match.group(2).lower()}"
+    return text
+
+
+def _question_id_lookup(questions: list[dict[str, Any]]) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for question in questions:
+        question_id = str(question["id"])
+        lookup[question_id] = question_id
+        canonical = _canonical_question_key(question_id)
+        if canonical:
+            lookup[canonical] = question_id
+    return lookup
+
+
+def _part_parent_lookup(
+    questions: list[dict[str, Any]],
+) -> dict[str, tuple[str, dict[str, Any]]]:
+    lookup: dict[str, tuple[str, dict[str, Any]]] = {}
+    for question in questions:
+        parent_id = str(question["id"])
+        for part in question.get("parts") or []:
+            part_id = str(part.get("id") or "")
+            if not part_id:
+                continue
+            lookup[part_id] = (parent_id, part)
+            canonical = _canonical_question_key(part_id)
+            if canonical:
+                lookup[canonical] = (parent_id, part)
+            label = str(part.get("label") or "")
+            if label:
+                lookup[_canonical_question_key(f"{parent_id}.{label}")] = (parent_id, part)
+    return {key: value for key, value in lookup.items() if key}
+
+
+def _clean_choice_rules(
+    raw_rules: Any,
+    questions: list[dict[str, Any]],
+    max_questions_to_grade: int | None,
+    choice_rule_text: str,
+) -> list[dict[str, Any]]:
+    question_lookup = _question_id_lookup(questions)
+    all_question_ids = [str(question["id"]) for question in questions]
+    rules: list[dict[str, Any]] = []
+    if isinstance(raw_rules, list):
+        for raw_rule in raw_rules:
+            if not isinstance(raw_rule, dict):
+                continue
+            rule_type = str(raw_rule.get("type") or "").strip().lower().replace("-", "_")
+            if rule_type in {"answer_any", "section_answer_any", "section_best_n"}:
+                rule_type = "best_n"
+            if rule_type in {"required", "must_answer", "all"}:
+                rule_type = "compulsory"
+            if rule_type not in {"best_n", "compulsory"}:
+                continue
+            count = _as_positive_int(raw_rule.get("count"))
+            question_ids: list[str] = []
+            for raw_id in raw_rule.get("question_ids", []):
+                resolved = question_lookup.get(str(raw_id).strip()) or question_lookup.get(_canonical_question_key(raw_id))
+                if resolved and resolved not in question_ids:
+                    question_ids.append(resolved)
+            if not question_ids:
+                question_ids = all_question_ids
+            if rule_type == "best_n" and (not count or count >= len(question_ids)):
+                rule_type = "compulsory"
+                count = None
+            if rule_type == "best_n" and count:
+                rules.append(
+                    {
+                        "type": "best_n",
+                        "count": count,
+                        "question_ids": question_ids,
+                        "description": str(raw_rule.get("description") or choice_rule_text).strip(),
+                    }
+                )
+            elif rule_type == "compulsory":
+                rules.append(
+                    {
+                        "type": "compulsory",
+                        "count": None,
+                        "question_ids": question_ids,
+                        "description": str(raw_rule.get("description") or "Compulsory questions").strip(),
+                    }
+                )
+    if (
+        rules
+        and max_questions_to_grade
+        and max_questions_to_grade < len(all_question_ids)
+        and len(rules) == 1
+        and rules[0]["type"] == "compulsory"
+        and set(rules[0]["question_ids"]) == set(all_question_ids)
+    ):
+        rules = []
+    if not rules and max_questions_to_grade and max_questions_to_grade < len(all_question_ids):
+        rules.append(
+            {
+                "type": "best_n",
+                "count": max_questions_to_grade,
+                "question_ids": all_question_ids,
+                "description": choice_rule_text or f"Best {max_questions_to_grade} of {len(all_question_ids)} questions.",
+            }
+        )
+    return rules
 
 
 def _clean_question_parts(
@@ -929,6 +1071,9 @@ def _missing_answer_text(answer_text: str) -> bool:
         "not found",
         "not visible",
         "no explicit response",
+        "no extracted answer",
+        "not answered",
+        "blank answer",
     ]
     return any(marker in normalized for marker in missing_markers)
 
@@ -1080,7 +1225,7 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
     exam = row_to_dict(
         conn.execute(
             """
-            SELECT e.total_marks, e.max_questions_to_grade
+            SELECT e.total_marks, e.max_questions_to_grade, e.choice_rules_json
             FROM submissions s
             JOIN exams e ON e.id = s.exam_id
             WHERE s.id = ?
@@ -1091,7 +1236,7 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
     rows = rows_to_dicts(
         conn.execute(
             """
-            SELECT id, answer_text, attempted, final_score, max_marks, confidence
+            SELECT id, question_id, answer_text, attempted, final_score, max_marks, confidence
             FROM evaluations
             WHERE submission_id = ?
             """,
@@ -1099,8 +1244,58 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
         ).fetchall()
     )
     selected_ids: set[str]
-    max_questions = exam and exam.get("max_questions_to_grade")
-    if max_questions:
+    choice_rules = json_loads((exam or {}).get("choice_rules_json", "[]"), []) if exam else []
+    selected_ids = set()
+    confidence_rows: list[dict[str, Any]]
+    total_score = 0.0
+    computed_total_marks = 0.0
+
+    if choice_rules:
+        rows_by_question = {str(row["question_id"]): row for row in rows}
+        all_rule_candidates: list[dict[str, Any]] = []
+        total_capacity_ids: set[str] = set()
+        for rule in choice_rules:
+            if not isinstance(rule, dict):
+                continue
+            question_ids = [
+                str(question_id)
+                for question_id in rule.get("question_ids", [])
+                if str(question_id) in rows_by_question
+            ] or list(rows_by_question.keys())
+            rule_rows = [rows_by_question[question_id] for question_id in question_ids]
+            rule_type = str(rule.get("type") or "").lower()
+            count = _as_positive_int(rule.get("count"))
+            if rule_type == "best_n" and count:
+                candidates = [
+                    row
+                    for row in rule_rows
+                    if row["attempted"] or str(row["answer_text"]).strip() or float(row["final_score"]) > 0
+                ]
+                all_rule_candidates.extend(candidates)
+                selected = sorted(
+                    candidates,
+                    key=lambda row: (float(row["final_score"]), float(row["confidence"])),
+                    reverse=True,
+                )[:count]
+                selected_ids.update(row["id"] for row in selected)
+                capacity_rows = sorted(
+                    rule_rows,
+                    key=lambda row: float(row["max_marks"]),
+                    reverse=True,
+                )[:count]
+                total_capacity_ids.update(row["id"] for row in capacity_rows)
+            elif rule_type == "compulsory":
+                selected_ids.update(row["id"] for row in rule_rows)
+                total_capacity_ids.update(row["id"] for row in rule_rows)
+                all_rule_candidates.extend(rule_rows)
+        selected_rows = [row for row in rows if row["id"] in selected_ids]
+        total_score = sum(float(row["final_score"]) for row in selected_rows)
+        computed_total_marks = sum(float(row["max_marks"]) for row in rows if row["id"] in total_capacity_ids)
+        total_marks = float(exam["total_marks"]) if exam and float(exam["total_marks"]) > 0 else computed_total_marks
+        total_score = _clamp(total_score, 0, total_marks) if total_marks else total_score
+        confidence_rows = selected_rows or all_rule_candidates or rows
+    elif exam and exam.get("max_questions_to_grade"):
+        max_questions = exam.get("max_questions_to_grade")
         candidates = [
             row
             for row in rows
@@ -1139,6 +1334,86 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
         """,
         (total_score, total_marks, avg_confidence, now_iso(), submission_id),
     )
+
+
+def _evaluation_item_attempted(item: dict[str, Any]) -> bool:
+    return bool(item.get("attempted")) or not _missing_answer_text(str(item.get("answer_text", "")))
+
+
+def _merge_part_level_evaluations(
+    *,
+    result: dict[str, Any],
+    questions: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    question_lookup = _question_id_lookup(questions)
+    part_lookup = _part_parent_lookup(questions)
+    top_level_items: dict[str, dict[str, Any]] = {}
+    part_groups: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+
+    for raw_item in result.get("questions", []):
+        if not isinstance(raw_item, dict):
+            continue
+        raw_question_id = str(raw_item.get("question_id", "")).strip()
+        canonical_id = _canonical_question_key(raw_question_id)
+        parent_id = question_lookup.get(raw_question_id) or question_lookup.get(canonical_id)
+        if parent_id:
+            top_level_items.setdefault(parent_id, raw_item)
+            continue
+        part_entry = part_lookup.get(raw_question_id) or part_lookup.get(canonical_id)
+        if part_entry:
+            group_parent_id, part = part_entry
+            part_groups.setdefault(group_parent_id, []).append((part, raw_item))
+
+    for parent_id, items in part_groups.items():
+        if parent_id in top_level_items:
+            continue
+        attempted_parts = [
+            (part, item)
+            for part, item in items
+            if _evaluation_item_attempted(item)
+        ]
+        answer_chunks: list[str] = []
+        reason_chunks: list[str] = []
+        missing_points: list[str] = []
+        confidence_values: list[float] = []
+        score = 0.0
+        review_required = False
+        for part, item in items:
+            part_id = str(part.get("id") or parent_id)
+            part_marks = float(part.get("max_marks") or 0)
+            attempted = _evaluation_item_attempted(item)
+            if attempted:
+                answer_text = str(item.get("answer_text", "")).strip()
+                if answer_text:
+                    answer_chunks.append(f"{part_id}: {answer_text}")
+                score += _clamp(_as_float(item.get("score")), 0, part_marks)
+            reason = str(item.get("reason", "")).strip()
+            if reason:
+                reason_chunks.append(f"{part_id}: {reason}")
+            for point in item.get("missing_points", []):
+                point_text = str(point).strip()
+                if point_text:
+                    missing_points.append(f"{part_id}: {point_text}")
+            confidence_values.append(_clamp(_as_float(item.get("confidence")), 0, 100))
+            review_required = review_required or bool(item.get("review_required"))
+        top_level_items[parent_id] = {
+            "question_id": parent_id,
+            "answer_text": "\n".join(answer_chunks),
+            "attempted": bool(attempted_parts),
+            "score": score,
+            "max_marks": sum(float(part.get("max_marks") or 0) for part, _ in items),
+            "reason": " ".join(reason_chunks)
+            or "Subpart-level answers were merged into the parent question.",
+            "missing_points": missing_points,
+            "confidence": (
+                sum(confidence_values) / len(confidence_values)
+                if confidence_values
+                else 0
+            ),
+            "review_required": review_required or not attempted_parts,
+        }
+
+    return top_level_items
 
 
 def _run_evaluation(submission_id: str) -> None:
@@ -1186,24 +1461,53 @@ def _run_evaluation(submission_id: str) -> None:
             verifier_warning = f" Verification agent could not complete: {exc}"
 
         question_map = {str(question["id"]): question for question in exam["questions"]}
-        seen_question_ids: set[str] = set()
+        merged_items = _merge_part_level_evaluations(
+            result=result,
+            questions=exam["questions"],
+        )
         created_at = now_iso()
         with get_db() as conn:
             conn.execute("DELETE FROM evaluations WHERE submission_id = ?", (submission_id,))
-            for item in result.get("questions", []):
-                question_id = str(item.get("question_id", "")).strip()
-                question = question_map.get(question_id)
-                if not question or question_id in seen_question_ids:
+            for question_id, question in question_map.items():
+                item = merged_items.get(question_id)
+                if not item:
+                    max_marks = float(question["max_marks"])
+                    conn.execute(
+                        """
+                        INSERT INTO evaluations
+                        (id, submission_id, question_id, question_text, answer_text, attempted, counts_toward_total,
+                         score, max_marks, final_score, confidence, review_required, reason, missing_points_json,
+                         created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            new_id("eval"),
+                            submission_id,
+                            question_id,
+                            question["text"],
+                            "",
+                            0,
+                            0,
+                            0,
+                            max_marks,
+                            0,
+                            0,
+                            1,
+                            "The evaluation agent did not return this question. Teacher review is required before publishing.",
+                            json.dumps(["No AI evaluation was returned for this question."]),
+                            created_at,
+                            created_at,
+                        ),
+                    )
                     continue
-                seen_question_ids.add(question_id)
                 max_marks = float(question["max_marks"])
                 answer_text = str(item.get("answer_text", ""))
                 attempted_raw = item.get("attempted")
                 attempted = bool(attempted_raw) or not _missing_answer_text(answer_text)
                 if not attempted:
                     answer_text = ""
-                score = _clamp(float(item.get("score", 0)), 0, max_marks) if attempted else 0
-                confidence = _clamp(float(item.get("confidence", 0)), 0, 100)
+                score = _clamp(_as_float(item.get("score")), 0, max_marks) if attempted else 0
+                confidence = _clamp(_as_float(item.get("confidence")), 0, 100)
                 review_required = (bool(item.get("review_required")) or confidence < 80) if attempted else False
                 conn.execute(
                     """
@@ -1228,37 +1532,6 @@ def _run_evaluation(submission_id: str) -> None:
                         1 if review_required else 0,
                         str(item.get("reason", "")),
                         json.dumps(item.get("missing_points", [])),
-                        created_at,
-                        created_at,
-                    ),
-                )
-            for question_id, question in question_map.items():
-                if question_id in seen_question_ids:
-                    continue
-                max_marks = float(question["max_marks"])
-                conn.execute(
-                    """
-                    INSERT INTO evaluations
-                    (id, submission_id, question_id, question_text, answer_text, attempted, counts_toward_total,
-                     score, max_marks, final_score, confidence, review_required, reason, missing_points_json,
-                     created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        new_id("eval"),
-                        submission_id,
-                        question_id,
-                        question["text"],
-                        "",
-                        0,
-                        0,
-                        0,
-                        max_marks,
-                        0,
-                        0,
-                        1,
-                        "The evaluation agent did not return this question. Teacher review is required before publishing.",
-                        json.dumps(["No AI evaluation was returned for this question."]),
                         created_at,
                         created_at,
                     ),
