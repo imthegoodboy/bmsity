@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
@@ -33,13 +34,34 @@ def _rule_text(exam: dict[str, Any]) -> str:
 
 def _as_float(value: Any) -> float:
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return 0
+    return number if math.isfinite(number) else 0
+
+
+def _missing_answer_text(answer_text: str) -> bool:
+    normalized = answer_text.strip().lower()
+    if not normalized:
+        return True
+    missing_markers = [
+        "no distinct answer",
+        "no separate answer",
+        "not found",
+        "not visible",
+        "no explicit response",
+        "no extracted answer",
+        "not answered",
+        "blank answer",
+    ]
+    return any(marker in normalized for marker in missing_markers)
 
 
 def _is_attempted(item: dict[str, Any]) -> bool:
-    return bool(item.get("attempted")) or _as_float(item.get("final_score")) > 0
+    return (
+        (bool(item.get("attempted")) and not _missing_answer_text(str(item.get("answer_text") or "")))
+        or _as_float(item.get("final_score")) > 0
+    )
 
 
 def reportable_evaluations(evaluations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -70,8 +92,8 @@ def generate_report(
     styles = getSampleStyleSheet()
     doc = SimpleDocTemplate(str(destination), pagesize=A4, rightMargin=32, leftMargin=32)
 
-    total = float(submission.get("total_score", 0))
-    max_total = float(submission.get("total_marks", 0))
+    total = _as_float(submission.get("total_score", 0))
+    max_total = _as_float(submission.get("total_marks", 0))
     visible_evaluations = reportable_evaluations(evaluations)
 
     story: list[Any] = [
@@ -98,8 +120,8 @@ def generate_report(
             table_data.append(
                 [
                     item["question_id"],
-                    f"{float(item['final_score']):g}/{float(item['max_marks']):g}",
-                    f"{float(item['confidence']):g}%",
+                    f"{_as_float(item.get('final_score')):g}/{_as_float(item.get('max_marks')):g}",
+                    f"{_as_float(item.get('confidence')):g}%",
                     status,
                     Paragraph(_feedback_text(item), styles["BodyText"]),
                 ]

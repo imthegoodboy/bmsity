@@ -1340,6 +1340,13 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
     total_score = 0.0
     computed_total_marks = 0.0
 
+    def row_attempted(row: dict[str, Any]) -> bool:
+        return (
+            bool(row["attempted"])
+            or not _missing_answer_text(str(row.get("answer_text") or ""))
+            or _as_float(row["final_score"]) > 0
+        )
+
     if choice_rules:
         rows_by_question = {str(row["question_id"]): row for row in rows}
         all_rule_candidates: list[dict[str, Any]] = []
@@ -1359,18 +1366,18 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
                 candidates = [
                     row
                     for row in rule_rows
-                    if row["attempted"] or str(row["answer_text"]).strip() or float(row["final_score"]) > 0
+                    if row_attempted(row)
                 ]
                 all_rule_candidates.extend(candidates)
                 selected = sorted(
                     candidates,
-                    key=lambda row: (float(row["final_score"]), float(row["confidence"])),
+                    key=lambda row: (_as_float(row["final_score"]), _as_float(row["confidence"])),
                     reverse=True,
                 )[:count]
                 selected_ids.update(row["id"] for row in selected)
                 capacity_rows = sorted(
                     rule_rows,
-                    key=lambda row: float(row["max_marks"]),
+                    key=lambda row: _as_float(row["max_marks"]),
                     reverse=True,
                 )[:count]
                 total_capacity_ids.update(row["id"] for row in capacity_rows)
@@ -1379,9 +1386,10 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
                 total_capacity_ids.update(row["id"] for row in rule_rows)
                 all_rule_candidates.extend(rule_rows)
         selected_rows = [row for row in rows if row["id"] in selected_ids]
-        total_score = sum(float(row["final_score"]) for row in selected_rows)
-        computed_total_marks = sum(float(row["max_marks"]) for row in rows if row["id"] in total_capacity_ids)
-        total_marks = float(exam["total_marks"]) if exam and float(exam["total_marks"]) > 0 else computed_total_marks
+        total_score = sum(_as_float(row["final_score"]) for row in selected_rows)
+        computed_total_marks = sum(_as_float(row["max_marks"]) for row in rows if row["id"] in total_capacity_ids)
+        exam_total = _as_float(exam["total_marks"]) if exam else 0
+        total_marks = exam_total if exam_total > 0 else computed_total_marks
         total_score = _clamp(total_score, 0, total_marks) if total_marks else total_score
         confidence_rows = selected_rows or all_rule_candidates or rows
     elif exam and exam.get("max_questions_to_grade"):
@@ -1389,25 +1397,25 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
         candidates = [
             row
             for row in rows
-            if row["attempted"] or str(row["answer_text"]).strip() or float(row["final_score"]) > 0
+            if row_attempted(row)
         ]
         selected = sorted(
             candidates,
-            key=lambda row: (float(row["final_score"]), float(row["confidence"])),
+            key=lambda row: (_as_float(row["final_score"]), _as_float(row["confidence"])),
             reverse=True,
         )[: int(max_questions)]
         selected_ids = {row["id"] for row in selected}
-        total_score = sum(float(row["final_score"]) for row in selected)
-        total_marks = float(exam["total_marks"]) if exam else sum(float(row["max_marks"]) for row in selected)
+        total_score = sum(_as_float(row["final_score"]) for row in selected)
+        total_marks = _as_float(exam["total_marks"]) if exam else sum(_as_float(row["max_marks"]) for row in selected)
         total_score = _clamp(total_score, 0, total_marks)
         confidence_rows = selected or candidates or rows
     else:
         selected_ids = {row["id"] for row in rows}
-        total_score = sum(float(row["final_score"]) for row in rows)
-        total_marks = sum(float(row["max_marks"]) for row in rows)
+        total_score = sum(_as_float(row["final_score"]) for row in rows)
+        total_marks = sum(_as_float(row["max_marks"]) for row in rows)
         confidence_rows = rows
     avg_confidence = (
-        sum(float(row["confidence"]) for row in confidence_rows) / len(confidence_rows)
+        sum(_as_float(row["confidence"]) for row in confidence_rows) / len(confidence_rows)
         if confidence_rows
         else 0
     )
@@ -1427,7 +1435,9 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
 
 
 def _evaluation_item_attempted(item: dict[str, Any]) -> bool:
-    return bool(item.get("attempted")) or not _missing_answer_text(str(item.get("answer_text", "")))
+    answer_text = str(item.get("answer_text", ""))
+    score = max(_as_float(item.get("score")), _as_float(item.get("final_score")))
+    return not _missing_answer_text(answer_text) or score > 0
 
 
 def _merge_part_level_evaluations(
@@ -1592,11 +1602,11 @@ def _run_evaluation(submission_id: str) -> None:
                     continue
                 max_marks = float(question["max_marks"])
                 answer_text = str(item.get("answer_text", ""))
-                attempted_raw = item.get("attempted")
-                attempted = bool(attempted_raw) or not _missing_answer_text(answer_text)
+                raw_score = _clamp(_as_float(item.get("score")), 0, max_marks)
+                attempted = _evaluation_item_attempted({**item, "score": raw_score})
                 if not attempted:
                     answer_text = ""
-                score = _clamp(_as_float(item.get("score")), 0, max_marks) if attempted else 0
+                score = raw_score if attempted else 0
                 confidence = _clamp(_as_float(item.get("confidence")), 0, 100)
                 review_required = (bool(item.get("review_required")) or confidence < 80) if attempted else False
                 conn.execute(
@@ -1725,14 +1735,14 @@ def update_evaluation(
 
         final_score = current["final_score"]
         if payload.final_score is not None:
-            final_score = _clamp(float(payload.final_score), 0, float(current["max_marks"]))
+            final_score = _clamp(_as_float(payload.final_score), 0, _as_float(current["max_marks"]))
         reason = current["reason"] if payload.reason is None else payload.reason
         review_required = (
             current["review_required"]
             if payload.review_required is None
             else (1 if payload.review_required else 0)
         )
-        attempted = 1 if current["attempted"] or float(final_score) > 0 else 0
+        attempted = 1 if current["attempted"] or _as_float(final_score) > 0 else 0
 
         conn.execute(
             """

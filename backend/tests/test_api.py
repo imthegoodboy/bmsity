@@ -159,6 +159,29 @@ def test_nonfinite_ai_numbers_fall_back_safely():
     assert main._as_positive_float("Infinity") is None
     assert main._as_positive_int("4.0") == 4
     assert main._clamp(float("nan"), 0, 10) == 0
+    assert main.reportable_evaluations(
+        [
+            {
+                "question_id": "Q1",
+                "attempted": True,
+                "answer_text": "No extracted answer text returned.",
+                "final_score": 0,
+            },
+            {
+                "question_id": "Q2",
+                "attempted": True,
+                "answer_text": "Real answer text.",
+                "final_score": "NaN",
+            },
+        ]
+    ) == [
+        {
+            "question_id": "Q2",
+            "attempted": True,
+            "answer_text": "Real answer text.",
+            "final_score": "NaN",
+        }
+    ]
 
 
 def test_schema_image_creates_exam(tmp_path, monkeypatch):
@@ -593,6 +616,74 @@ def test_evaluation_backfills_missing_questions_for_review(tmp_path, monkeypatch
     report = client.get(f"/submissions/{submission['id']}/report", headers=headers)
     assert report.status_code == 200
     assert captured["question_ids"] == ["Q1"]
+
+
+def test_agent_placeholder_attempt_is_not_counted_or_reported(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    exam = create_exam(client)
+    submission = upload_submission(client, exam["id"])
+
+    def fake_evaluator(**kwargs):
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "questions": [
+                {
+                    "question_id": "Q1",
+                    "answer_text": "No distinct answer visible.",
+                    "attempted": True,
+                    "score": 0,
+                    "max_marks": 2,
+                    "reason": "Agent incorrectly marked this placeholder as attempted.",
+                    "missing_points": ["No visible answer"],
+                    "confidence": 91,
+                    "review_required": False,
+                },
+                {
+                    "question_id": "Q2",
+                    "answer_text": "Acceleration is the rate of change of velocity.",
+                    "attempted": True,
+                    "score": 3,
+                    "max_marks": 3,
+                    "reason": "Correct.",
+                    "missing_points": [],
+                    "confidence": 94,
+                    "review_required": False,
+                },
+            ],
+            "summary": {
+                "overall_feedback": "One real answer detected.",
+                "weak_areas": [],
+            },
+        }
+
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+    headers = teacher_headers(client)
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+
+    fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
+    q1 = next(item for item in fetched["evaluations"] if item["question_id"] == "Q1")
+    q2 = next(item for item in fetched["evaluations"] if item["question_id"] == "Q2")
+    assert q1["attempted"] is False
+    assert q1["answer_text"] == ""
+    assert q1["final_score"] == 0
+    assert q2["attempted"] is True
+    assert fetched["total_score"] == 3
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_generate_report(**kwargs):
+        captured["question_ids"] = [item["question_id"] for item in kwargs["evaluations"]]
+        destination = kwargs["destination"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"%PDF-1.4\n%%EOF")
+        return destination
+
+    monkeypatch.setattr(main, "generate_report", fake_generate_report)
+    report = client.get(f"/submissions/{submission['id']}/report", headers=headers)
+    assert report.status_code == 200
+    assert captured["question_ids"] == ["Q2"]
 
 
 def test_choice_exam_scores_best_attempted_questions_only(tmp_path, monkeypatch):
