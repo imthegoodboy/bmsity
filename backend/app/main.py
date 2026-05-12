@@ -19,7 +19,12 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPE
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from .ai import evaluate_submission_with_openai, extract_schema_with_openai, ensure_openai_ready
+from .ai import (
+    evaluate_submission_with_openai,
+    extract_schema_with_openai,
+    ensure_openai_ready,
+    verify_evaluation_with_openai,
+)
 from .database import get_db, init_db, json_loads, row_to_dict, rows_to_dicts
 from .reports import generate_report
 from .schemas import (
@@ -48,9 +53,18 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="BmsitAi API", lifespan=lifespan)
 
+LOCAL_FRONTEND_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:3002",
+    "http://127.0.0.1:3002",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_origin, "http://127.0.0.1:3000"],
+    allow_origins=list(dict.fromkeys([settings.frontend_origin, *LOCAL_FRONTEND_ORIGINS])),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -231,6 +245,9 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "openai_configured": bool(settings.openai_api_key),
         "model": settings.openai_model,
+        "schema_model": settings.openai_schema_model,
+        "evaluation_model": settings.openai_evaluation_model,
+        "verifier_model": settings.openai_verifier_model,
     }
 
 
@@ -440,7 +457,9 @@ async def create_exam_from_schema_image(
     subject: str = Form("General"),
     title: str = Form("Answer Schema"),
     default_marks: float | None = Form(None),
-    file: UploadFile = File(...),
+    schema_files: list[UploadFile] | None = File(None),
+    question_files: list[UploadFile] | None = File(None),
+    file: UploadFile | None = File(None),
     _: AuthUser = Depends(require_teacher),
 ) -> ExamOut:
     try:
@@ -451,16 +470,20 @@ async def create_exam_from_schema_image(
         raise HTTPException(status_code=422, detail="Marks must be greater than zero.")
     fallback_marks = float(default_marks or 10)
 
-    schema_root = settings.upload_dir / "_schemas"
-    schema_root.mkdir(parents=True, exist_ok=True)
-    original = clean_filename(file.filename or "answer-schema")
-    stored_path = schema_root / f"{uuid.uuid4().hex[:12]}_{original}"
-    with stored_path.open("wb") as file_handle:
-        shutil.copyfileobj(file.file, file_handle)
+    uploads = list(schema_files or [])
+    if file:
+        uploads.append(file)
+    if not uploads:
+        raise HTTPException(status_code=400, detail="Upload at least one answer scheme file.")
+
+    schema_root = settings.upload_dir / "_schemas" / uuid.uuid4().hex[:12]
+    schema_paths = _save_uploads(schema_root / "answer-scheme", uploads, "answer-scheme")
+    question_paths = _save_uploads(schema_root / "question-paper", list(question_files or []), "question-paper")
 
     try:
         extracted = extract_schema_with_openai(
-            file_path=stored_path,
+            schema_paths=schema_paths,
+            question_paper_paths=question_paths,
             subject=subject.strip() or "General",
             title=title.strip() or "Answer Schema",
             default_marks=fallback_marks,
@@ -472,12 +495,37 @@ async def create_exam_from_schema_image(
     for index, question in enumerate(extracted.get("questions", []), start=1):
         text = str(question.get("text", "")).strip()
         model_answer = str(question.get("model_answer", "")).strip()
-        if not text or not model_answer:
+        if not text:
             continue
-        max_marks = _as_positive_float(question.get("max_marks")) or fallback_marks
+        raw_parts = question.get("parts", [])
+        raw_parts_payload = raw_parts if isinstance(raw_parts, list) else []
+        raw_part_marks = [
+            mark
+            for mark in (
+                _as_positive_float(part.get("max_marks"))
+                for part in raw_parts_payload
+                if isinstance(part, dict)
+            )
+            if mark
+        ]
+        max_marks = _as_positive_float(question.get("max_marks")) or sum(raw_part_marks) or fallback_marks
+        question_id = str(question.get("id") or f"Q{index}").strip() or f"Q{index}"
+        parts = _clean_question_parts(
+            parent_id=question_id,
+            raw_parts=raw_parts_payload,
+            parent_max_marks=max_marks,
+            fallback_marks=fallback_marks,
+        )
+        part_total = sum(float(part["max_marks"]) for part in parts)
+        if parts and (not _as_positive_float(question.get("max_marks")) or part_total > max_marks):
+            max_marks = part_total
+        if not model_answer and parts:
+            model_answer = "Grade using the extracted subpart model answers and marking rules."
+        if not model_answer:
+            continue
         questions.append(
             {
-                "id": str(question.get("id") or f"Q{index}").strip() or f"Q{index}",
+                "id": question_id,
                 "text": text,
                 "max_marks": max(0.5, float(max_marks)),
                 "model_answer": model_answer,
@@ -487,13 +535,14 @@ async def create_exam_from_schema_image(
                     for keyword in question.get("keywords", [])
                     if str(keyword).strip()
                 ],
+                "parts": parts,
             }
         )
 
     if not questions:
         raise HTTPException(
             status_code=400,
-            detail="Could not find a question and answer schema in the uploaded image.",
+            detail="Could not find a question and answer schema in the uploaded files.",
         )
 
     extracted_total_marks = _as_positive_float(extracted.get("total_marks"))
@@ -554,6 +603,7 @@ async def create_submission(
     exam_id: str,
     student_name: str = Form(...),
     usn: str = Form(""),
+    attempt_hints: str = Form(""),
     files: list[UploadFile] = File(...),
     _: AuthUser = Depends(require_teacher),
 ) -> SubmissionCreated:
@@ -563,6 +613,7 @@ async def create_submission(
     if not student_name.strip():
         raise HTTPException(status_code=422, detail="Student name is required.")
     normalized_usn = normalize_usn(usn)
+    parsed_attempt_hints = _parse_attempt_hints(attempt_hints)
 
     created_at = now_iso()
     submission_id = new_id("sub")
@@ -590,10 +641,19 @@ async def create_submission(
         conn.execute(
             """
             INSERT INTO submissions
-            (id, exam_id, student_name, usn, status, total_marks, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'uploaded', ?, ?, ?)
+            (id, exam_id, student_name, usn, status, total_marks, attempt_hints_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'uploaded', ?, ?, ?, ?)
             """,
-            (submission_id, exam_id, student_name.strip(), normalized_usn, 0, created_at, created_at),
+            (
+                submission_id,
+                exam_id,
+                student_name.strip(),
+                normalized_usn,
+                0,
+                json.dumps(parsed_attempt_hints),
+                created_at,
+                created_at,
+            ),
         )
         _ensure_student_account(conn, normalized_usn)
         conn.executemany(
@@ -641,6 +701,7 @@ def _submission_bundle(submission_id: str) -> SubmissionOut:
         **{
             **submission,
             "weak_areas": json_loads(submission["weak_areas_json"], []),
+            "attempt_hints": json_loads(submission.get("attempt_hints_json", "[]"), []),
             "files": files,
             "evaluations": [
                 {
@@ -774,6 +835,88 @@ def _as_positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def _save_uploads(root: Path, uploads: list[UploadFile], fallback_prefix: str) -> list[Path]:
+    root.mkdir(parents=True, exist_ok=True)
+    saved: list[Path] = []
+    for index, upload in enumerate(uploads, start=1):
+        original = clean_filename(upload.filename or f"{fallback_prefix}-{index}")
+        stored_path = root / f"{index:02d}_{uuid.uuid4().hex[:8]}_{original}"
+        with stored_path.open("wb") as file_handle:
+            shutil.copyfileobj(upload.file, file_handle)
+        saved.append(stored_path)
+    return saved
+
+
+def _parse_attempt_hints(value: str) -> list[str]:
+    if not value.strip():
+        return []
+    chunks = re.split(r"[,;\n]+", value)
+    if len(chunks) == 1:
+        chunks = re.split(r"\s+", value)
+    hints: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        cleaned = re.sub(r"\s+", "", chunk).strip().strip(".")
+        if not cleaned:
+            continue
+        if cleaned.isdigit():
+            cleaned = f"Q{cleaned}"
+        if re.fullmatch(r"\d+[A-Za-z]?", cleaned):
+            cleaned = f"Q{cleaned}"
+        normalized = cleaned.upper()
+        if normalized not in seen:
+            seen.add(normalized)
+            hints.append(normalized)
+    return hints[:40]
+
+
+def _clean_question_parts(
+    *,
+    parent_id: str,
+    raw_parts: list[Any],
+    parent_max_marks: float,
+    fallback_marks: float,
+) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] = []
+    usable_parts: list[dict[str, Any]] = []
+    for index, raw_part in enumerate(raw_parts, start=1):
+        if not isinstance(raw_part, dict):
+            continue
+        text = str(raw_part.get("text", "")).strip()
+        model_answer = str(raw_part.get("model_answer", "")).strip()
+        if not text and not model_answer:
+            continue
+        label = str(raw_part.get("label") or "").strip()
+        part_id = str(raw_part.get("id") or "").strip()
+        if not label and "." in part_id:
+            label = part_id.rsplit(".", 1)[-1]
+        if not label:
+            label = chr(96 + index) if index <= 26 else str(index)
+        if not part_id:
+            part_id = f"{parent_id}.{label}"
+        usable_parts.append(
+            {
+                "id": part_id,
+                "label": label,
+                "text": text or f"Part {label}",
+                "max_marks": _as_positive_float(raw_part.get("max_marks")),
+                "model_answer": model_answer,
+                "marking_rules": str(raw_part.get("marking_rules", "")).strip(),
+                "keywords": [
+                    str(keyword).strip()
+                    for keyword in raw_part.get("keywords", [])
+                    if str(keyword).strip()
+                ],
+            }
+        )
+    if not usable_parts:
+        return []
+    default_part_marks = parent_max_marks / len(usable_parts) if parent_max_marks > 0 else fallback_marks
+    for part in usable_parts:
+        parts.append({**part, "max_marks": float(part["max_marks"] or default_part_marks or fallback_marks)})
+    return parts
 
 
 def _missing_answer_text(answer_text: str) -> bool:
@@ -919,6 +1062,17 @@ def _normalize_schema_questions(
             else sum(marks)
         )
 
+    for question in questions:
+        parts = question.get("parts") or []
+        if not parts:
+            continue
+        part_total = sum(float(part.get("max_marks") or 0) for part in parts)
+        parent_marks = float(question["max_marks"])
+        if part_total > 0 and parent_marks > 0 and abs(part_total - parent_marks) > 0.01:
+            scale = parent_marks / part_total
+            for part in parts:
+                part["max_marks"] = max(0.5, round(float(part.get("max_marks") or 0) * scale, 2))
+
     return questions, total_marks, max_questions_to_grade
 
 
@@ -1000,7 +1154,7 @@ def _run_evaluation(submission_id: str) -> None:
             )
             files = rows_to_dicts(
                 conn.execute(
-                    "SELECT stored_path FROM submission_files WHERE submission_id = ? ORDER BY original_name",
+                    "SELECT stored_path FROM submission_files WHERE submission_id = ? ORDER BY stored_path",
                     (submission_id,),
                 ).fetchall()
             )
@@ -1008,12 +1162,28 @@ def _run_evaluation(submission_id: str) -> None:
         if not exam:
             raise RuntimeError("Exam not found.")
         exam["questions"] = json_loads(exam["questions_json"], [])
-        result = evaluate_submission_with_openai(
+        attempt_hints = json_loads(submission.get("attempt_hints_json", "[]"), [])
+        answer_paths = [Path(row["stored_path"]) for row in files]
+        draft_result = evaluate_submission_with_openai(
             exam=exam,
             student_name=submission["student_name"],
             usn=submission["usn"],
-            file_paths=[Path(row["stored_path"]) for row in files],
+            file_paths=answer_paths,
+            attempt_hints=attempt_hints,
         )
+        verifier_warning = ""
+        try:
+            result = verify_evaluation_with_openai(
+                exam=exam,
+                student_name=submission["student_name"],
+                usn=submission["usn"],
+                file_paths=answer_paths,
+                draft_result=draft_result,
+                attempt_hints=attempt_hints,
+            )
+        except RuntimeError as exc:
+            result = draft_result
+            verifier_warning = f" Verification agent could not complete: {exc}"
 
         question_map = {str(question["id"]): question for question in exam["questions"]}
         seen_question_ids: set[str] = set()
@@ -1094,6 +1264,9 @@ def _run_evaluation(submission_id: str) -> None:
                     ),
                 )
             summary = result.get("summary", {})
+            overall_feedback = str(summary.get("overall_feedback", ""))
+            if verifier_warning:
+                overall_feedback = (overall_feedback + verifier_warning).strip()
             conn.execute(
                 """
                 UPDATE submissions
@@ -1101,7 +1274,7 @@ def _run_evaluation(submission_id: str) -> None:
                 WHERE id = ?
                 """,
                 (
-                    str(summary.get("overall_feedback", "")),
+                    overall_feedback,
                     json.dumps(summary.get("weak_areas", [])),
                     now_iso(),
                     submission_id,

@@ -21,7 +21,8 @@ export default function TeacherExamsPage() {
 
   const [schemaSubject, setSchemaSubject] = useState("");
   const [schemaTitle, setSchemaTitle] = useState("");
-  const [schemaFile, setSchemaFile] = useState<File | null>(null);
+  const [schemaFiles, setSchemaFiles] = useState<File[]>([]);
+  const [questionFiles, setQuestionFiles] = useState<File[]>([]);
 
   const [manualTitle, setManualTitle] = useState("");
   const [manualSubject, setManualSubject] = useState("");
@@ -45,20 +46,22 @@ export default function TeacherExamsPage() {
 
   async function extractSchema(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!session || !schemaFile) return;
+    if (!session || !schemaFiles.length) return;
     setBusy("schema");
     setNotice("");
     try {
       const form = new FormData();
       form.append("subject", schemaSubject);
       form.append("title", schemaTitle);
-      form.append("file", schemaFile);
+      schemaFiles.forEach((file) => form.append("schema_files", file));
+      questionFiles.forEach((file) => form.append("question_files", file));
       const exam = await api<Exam>("/schema/extract", { method: "POST", body: form }, session.token);
       setExams((current) => [exam, ...current.filter((item) => item.id !== exam.id)]);
-      setSchemaFile(null);
+      setSchemaFiles([]);
+      setQuestionFiles([]);
       setSchemaSubject("");
       setSchemaTitle("");
-      setNotice("Answer scheme extracted. You can now check students from the Check page.");
+      setNotice("Exam blueprint extracted. Confirm the rule, then check students from the Check page.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Schema extraction failed");
     } finally {
@@ -150,10 +153,10 @@ export default function TeacherExamsPage() {
         <div className="teacher-grid">
           <form className="flow-panel" onSubmit={extractSchema}>
             <div className="split-head">
-              <h3>Extract from answer scheme</h3>
+              <h3>Extract exam blueprint</h3>
               <button
                 className="btn-primary"
-                disabled={!schemaFile || !schemaSubject || !schemaTitle || busy === "schema"}
+                disabled={!schemaFiles.length || !schemaSubject || !schemaTitle || busy === "schema"}
                 type="submit"
               >
                 {busy === "schema" ? <Loader2 className="animate-spin" size={16} /> : <SearchCheck size={16} />}
@@ -170,9 +173,25 @@ export default function TeacherExamsPage() {
             </label>
             <UploadBox
               accept=".pdf,.png,.jpg,.jpeg,.webp"
+              icon={<FileText size={22} />}
+              label={
+                questionFiles.length
+                  ? `${questionFiles.length} question paper file${questionFiles.length === 1 ? "" : "s"} selected`
+                  : "Upload question paper, optional"
+              }
+              multiple
+              onChange={setQuestionFiles}
+            />
+            <UploadBox
+              accept=".pdf,.png,.jpg,.jpeg,.webp"
               icon={<Upload size={22} />}
-              label={schemaFile ? schemaFile.name : "Upload answer scheme"}
-              onChange={(files) => setSchemaFile(files[0] ?? null)}
+              label={
+                schemaFiles.length
+                  ? `${schemaFiles.length} solution scheme file${schemaFiles.length === 1 ? "" : "s"} selected`
+                  : "Upload solution scheme"
+              }
+              multiple
+              onChange={setSchemaFiles}
             />
           </form>
 

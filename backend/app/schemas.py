@@ -5,6 +5,26 @@ from typing import Annotated
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
+class QuestionPartIn(BaseModel):
+    id: str = Field(min_length=1, max_length=32)
+    label: str = Field(default="", max_length=32)
+    text: str = Field(min_length=1)
+    max_marks: float = Field(gt=0)
+    model_answer: str = ""
+    marking_rules: str = ""
+    keywords: list[str] = Field(default_factory=list)
+
+    @field_validator("id", "label", "text", "model_answer", "marking_rules")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("keywords")
+    @classmethod
+    def clean_keywords(cls, value: list[str]) -> list[str]:
+        return [item.strip() for item in value if item.strip()]
+
+
 class QuestionIn(BaseModel):
     id: str = Field(min_length=1, max_length=32)
     text: str = Field(min_length=1)
@@ -12,6 +32,7 @@ class QuestionIn(BaseModel):
     model_answer: str = Field(min_length=1)
     marking_rules: str = ""
     keywords: list[str] = Field(default_factory=list)
+    parts: list[QuestionPartIn] = Field(default_factory=list)
 
     @field_validator("id", "text", "model_answer", "marking_rules")
     @classmethod
@@ -22,6 +43,18 @@ class QuestionIn(BaseModel):
     @classmethod
     def clean_keywords(cls, value: list[str]) -> list[str]:
         return [item.strip() for item in value if item.strip()]
+
+    @field_validator("parts")
+    @classmethod
+    def clean_parts(cls, value: list[QuestionPartIn]) -> list[QuestionPartIn]:
+        seen: set[str] = set()
+        cleaned: list[QuestionPartIn] = []
+        for part in value:
+            if part.id in seen:
+                continue
+            seen.add(part.id)
+            cleaned.append(part)
+        return cleaned
 
 
 class ExamCreate(BaseModel):
@@ -112,6 +145,7 @@ class SubmissionOut(BaseModel):
     error: str
     overall_feedback: str
     weak_areas: list[str]
+    attempt_hints: list[str] = Field(default_factory=list)
     files: list[SubmissionFileOut]
     evaluations: list[EvaluationOut]
     created_at: str

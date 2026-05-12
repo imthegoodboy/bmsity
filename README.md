@@ -4,10 +4,10 @@ BMSIT&M-branded AI answer sheet evaluation portal for teachers and students.
 
 ## What It Does
 
-- Teachers create exams from an uploaded answer scheme or a manual rubric.
-- The schema agent reads question numbers, per-question marks, total marks, subpart marks, and choice rules such as "best 4 of 8".
+- Teachers create exams from uploaded question paper pages plus solution-scheme pages, or from a manual rubric.
+- The blueprint agent reads question numbers, subparts, per-question marks, total marks, and choice rules such as "best 4 of 8" without hardcoding one paper pattern.
 - Teachers upload student answer sheets as PDFs or images.
-- The evaluation agent detects which questions the student actually attempted, extracts the written answer for each question number, grades against the matching rubric, and only counts the allowed questions.
+- The evaluation agent detects which questions and subparts the student attempted, extracts the written answer, grades against the matching rubric, and a verifier agent re-checks the marks before the backend applies the allowed-question rule.
 - Teachers review marks, edit final scores, re-check, publish, and export PDFs.
 - Students log in by USN after publish and can view/download only their published reports.
 
@@ -33,6 +33,9 @@ Set these values in `backend/.env`:
 ```env
 OPENAI_API_KEY=your_api_key_here
 OPENAI_MODEL=gpt-5.4-mini
+OPENAI_SCHEMA_MODEL=gpt-5.4-mini
+OPENAI_EVALUATION_MODEL=gpt-5.4-mini
+OPENAI_VERIFIER_MODEL=gpt-5.4-mini
 TEACHER_EMAIL=teacher@bmsit.ac.in
 TEACHER_PASSWORD=choose-a-real-password
 AUTH_SECRET=choose-a-long-random-secret
@@ -88,7 +91,7 @@ http://127.0.0.1:8000/health
 Expected health response:
 
 ```json
-{"status":"ok","openai_configured":true,"model":"gpt-5.4-mini"}
+{"status":"ok","openai_configured":true,"model":"gpt-5.4-mini","schema_model":"gpt-5.4-mini","evaluation_model":"gpt-5.4-mini","verifier_model":"gpt-5.4-mini"}
 ```
 
 ## Login Flow
@@ -108,19 +111,21 @@ Student:
 ## Teacher Demo Flow
 
 1. Open `/teacher/exams`.
-2. Upload the answer scheme PDF/image.
-3. Confirm the extracted exam shows the correct question count, total marks, and rule.
-4. Open `/teacher/check`.
-5. Select the exam.
-6. Enter student name and USN.
-7. Upload the answer sheet PDF or page images.
-8. Add the student to the queue.
-9. Run agents.
-10. Open `/teacher/review`.
-11. Confirm attempted/not attempted and counted/not counted questions.
-12. Edit marks if needed.
-13. Publish.
-14. Download the teacher PDF or let the student log in and download it.
+2. Upload the question paper files if available.
+3. Upload every solution-scheme PDF/image page.
+4. Confirm the extracted exam shows the correct question count, subparts, total marks, and rule.
+5. Open `/teacher/check`.
+6. Select the exam.
+7. Enter student name and USN.
+8. Optionally enter attempted-question hints such as `Q1, Q2, Q5, Q8`.
+9. Upload the answer sheet PDF or page images.
+10. Add the student to the queue.
+11. Run agents.
+12. Open `/teacher/review`.
+13. Confirm attempted/not attempted and counted/not counted questions.
+14. Edit marks if needed.
+15. Publish.
+16. Download the teacher PDF or let the student log in and download it.
 
 ## Important Grading Behavior
 
@@ -128,11 +133,16 @@ The system is not hardcoded for one paper. It stores the exam rule extracted fro
 
 - all questions compulsory
 - best N of M questions
+- nested parts such as Q1(a), Q1(b), Q2(i), and Q2(ii)
 - mixed per-question marks
 - subpart marks summed into a question total
 - unattempted questions separated from attempted but low-scoring answers
+- optional teacher hints for attempted questions
+- second-pass verification before totals are finalized
 
 If the schema extraction says "all questions" but the marks do not make sense, the backend cross-checks the math. Example: 8 questions listed, each 10 marks, paper total 40 means the system stores a best 4 of 8 rule.
+
+The AI agents extract and verify evidence. The backend still clamps marks, applies the final choice rule, and selects the counted questions deterministically.
 
 Old exams keep old extracted data. If you improve extraction logic, upload the scheme again as a new exam or repair/re-check existing submissions.
 

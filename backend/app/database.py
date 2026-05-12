@@ -58,6 +58,7 @@ def init_db(path: Path | None = None) -> None:
                 error TEXT NOT NULL DEFAULT '',
                 overall_feedback TEXT NOT NULL DEFAULT '',
                 weak_areas_json TEXT NOT NULL DEFAULT '[]',
+                attempt_hints_json TEXT NOT NULL DEFAULT '[]',
                 published INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -113,6 +114,10 @@ def init_db(path: Path | None = None) -> None:
         }
         if "published" not in columns:
             conn.execute("ALTER TABLE submissions ADD COLUMN published INTEGER NOT NULL DEFAULT 0")
+        if "attempt_hints_json" not in columns:
+            conn.execute(
+                "ALTER TABLE submissions ADD COLUMN attempt_hints_json TEXT NOT NULL DEFAULT '[]'"
+            )
         exam_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(exams)").fetchall()

@@ -25,6 +25,7 @@ def make_client(tmp_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setattr(main.settings, "teacher_email", "teacher@bmsit.ac.in")
     monkeypatch.setattr(main.settings, "teacher_password", "test-teacher-password")
     monkeypatch.setattr(main.settings, "auth_secret", "test-secret")
+    monkeypatch.setattr(main, "verify_evaluation_with_openai", lambda **kwargs: kwargs["draft_result"])
     return TestClient(main.app)
 
 
@@ -138,6 +139,71 @@ def test_schema_image_creates_exam(tmp_path, monkeypatch):
     assert payload["total_marks"] == 10
     assert payload["questions"][0]["id"] == "Q2"
     assert "components" in payload["questions"][0]["text"]
+
+
+def test_schema_extract_accepts_question_paper_and_nested_parts(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    captured: dict[str, int] = {}
+
+    def fake_schema_extractor(**kwargs):
+        captured["schema_count"] = len(kwargs["schema_paths"])
+        captured["question_count"] = len(kwargs["question_paper_paths"])
+        return {
+            "title": "Nested Paper",
+            "subject": "Computer Vision",
+            "instructions": "Answer all questions.",
+            "total_marks": 10,
+            "max_questions_to_grade": None,
+            "choice_rule": "Answer all questions.",
+            "questions": [
+                {
+                    "id": "Q1",
+                    "text": "Answer both subparts.",
+                    "max_marks": 10,
+                    "model_answer": "",
+                    "marking_rules": "",
+                    "keywords": [],
+                    "parts": [
+                        {
+                            "id": "Q1.a",
+                            "label": "a",
+                            "text": "Explain inverse problem.",
+                            "max_marks": 5,
+                            "model_answer": "Recover scene properties from image data.",
+                            "marking_rules": "",
+                            "keywords": ["inverse"],
+                        },
+                        {
+                            "id": "Q1.b",
+                            "label": "b",
+                            "text": "Explain lighting ambiguity.",
+                            "max_marks": 5,
+                            "model_answer": "Lighting changes appearance while object properties remain.",
+                            "marking_rules": "",
+                            "keywords": ["lighting"],
+                        },
+                    ],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(main, "extract_schema_with_openai", fake_schema_extractor)
+    response = client.post(
+        "/schema/extract",
+        data={"subject": "Computer Vision", "title": "Nested Paper"},
+        files=[
+            ("question_files", ("paper-1.png", b"fake-paper", "image/png")),
+            ("schema_files", ("scheme-1.png", b"fake-scheme-1", "image/png")),
+            ("schema_files", ("scheme-2.png", b"fake-scheme-2", "image/png")),
+        ],
+        headers=teacher_headers(client),
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert captured == {"schema_count": 2, "question_count": 1}
+    assert payload["questions"][0]["max_marks"] == 10
+    assert [part["id"] for part in payload["questions"][0]["parts"]] == ["Q1.a", "Q1.b"]
 
 
 def test_schema_choice_rule_normalizes_total_and_per_question_marks(tmp_path, monkeypatch):

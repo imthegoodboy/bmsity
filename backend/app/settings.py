@@ -23,6 +23,9 @@ def _path_from_env(name: str, default: str) -> Path:
 class Settings:
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
+    openai_schema_model: str = os.getenv("OPENAI_SCHEMA_MODEL", openai_model)
+    openai_evaluation_model: str = os.getenv("OPENAI_EVALUATION_MODEL", openai_model)
+    openai_verifier_model: str = os.getenv("OPENAI_VERIFIER_MODEL", openai_model)
     database_path: Path = _path_from_env("DATABASE_PATH", "./bmsitai.db")
     upload_dir: Path = _path_from_env("UPLOAD_DIR", "./uploads")
     report_dir: Path = _path_from_env("REPORT_DIR", "./reports")

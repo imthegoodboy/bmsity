@@ -20,6 +20,7 @@ export default function TeacherCheckPage() {
   const [activeExamId, setActiveExamId] = useState("");
   const [studentName, setStudentName] = useState("");
   const [usn, setUsn] = useState("");
+  const [attemptHints, setAttemptHints] = useState("");
   const [answerFiles, setAnswerFiles] = useState<File[]>([]);
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   const [notice, setNotice] = useState("");
@@ -57,12 +58,14 @@ export default function TeacherCheckPage() {
         studentName: studentName.trim(),
         usn: usn.trim().toUpperCase(),
         files: answerFiles,
+        attemptHints: attemptHints.trim(),
         status: "queued",
         message: "Agent waiting",
       },
     ]);
     setStudentName("");
     setUsn("");
+    setAttemptHints("");
     setAnswerFiles([]);
     setNotice("");
   }
@@ -84,6 +87,7 @@ export default function TeacherCheckPage() {
         const form = new FormData();
         form.append("student_name", entry.studentName);
         form.append("usn", entry.usn);
+        form.append("attempt_hints", entry.attemptHints);
         entry.files.forEach((file) => form.append("files", file));
         const created = await api<{ id: string }>(
           `/exams/${activeExam.id}/submissions`,
@@ -180,6 +184,15 @@ export default function TeacherCheckPage() {
                 <input className="field uppercase" onChange={(event) => setUsn(event.target.value)} value={usn} />
               </label>
             </div>
+            <label>
+              <span className="label">Attempted questions, optional</span>
+              <input
+                className="field uppercase"
+                onChange={(event) => setAttemptHints(event.target.value)}
+                placeholder="Example: Q1, Q2, Q5, Q8"
+                value={attemptHints}
+              />
+            </label>
             <UploadBox
               accept=".pdf,.png,.jpg,.jpeg,.webp"
               icon={<FileText size={22} />}
@@ -223,6 +236,7 @@ export default function TeacherCheckPage() {
                       <strong>Agent {index + 1}: {entry.studentName}</strong>
                       <span>
                         {entry.usn} - {entry.files.length} page{entry.files.length === 1 ? "" : "s"}
+                        {entry.attemptHints ? ` - hints: ${entry.attemptHints}` : ""}
                       </span>
                     </div>
                     <div className="text-right">

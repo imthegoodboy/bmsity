@@ -8,11 +8,13 @@ export type TeacherView = "exams" | "check" | "review" | "analytics";
 
 export type Question = {
   id: string;
+  label?: string;
   text: string;
   max_marks: number;
   model_answer: string;
   marking_rules: string;
   keywords: string[];
+  parts?: Question[];
 };
 
 export type Exam = {
@@ -56,6 +58,7 @@ export type Submission = {
   error: string;
   overall_feedback: string;
   weak_areas: string[];
+  attempt_hints?: string[];
   evaluations: Evaluation[];
   created_at: string;
   updated_at: string;
@@ -65,6 +68,9 @@ export type Health = {
   status: string;
   openai_configured: boolean;
   model: string;
+  schema_model?: string;
+  evaluation_model?: string;
+  verifier_model?: string;
 };
 
 export type AuthSession = {
@@ -91,6 +97,7 @@ export type QueueEntry = {
   studentName: string;
   usn: string;
   files: File[];
+  attemptHints: string;
   status: "queued" | "uploading" | "running" | "completed" | "failed";
   message: string;
   submissionId?: string;
