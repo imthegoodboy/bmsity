@@ -338,6 +338,71 @@ def extract_schema_with_openai(
         raise RuntimeError("OpenAI returned invalid JSON for the schema extraction.") from exc
 
 
+def verify_schema_with_openai(
+    *,
+    schema_paths: list[Path],
+    question_paper_paths: list[Path],
+    draft_schema: dict[str, Any],
+    subject: str,
+    title: str,
+    default_marks: float,
+) -> dict[str, Any]:
+    ensure_openai_ready()
+    client = OpenAI(api_key=settings.openai_api_key)
+
+    prompt = (
+        "Verify and repair this extracted exam blueprint against the original question paper and "
+        "solution scheme files. Return JSON only in the same schema. Keep correct question IDs, "
+        "marks, subparts, expected answers, and structured choice rules. Fix only clear mistakes: "
+        "missed subparts, wrong parent mark totals, paper total confused as per-question marks, "
+        "missing best-N/section choice rules, or wrong 'all questions' claims contradicted by the "
+        "visible total marks. Do not flatten mixed-mark papers: if different per-question marks are "
+        "visible, preserve them. Use the fallback mark only when no visible or inferable mark exists. "
+        "For section-wise choices, return separate choice_rules for compulsory groups and answer-any "
+        "groups. If the draft is already correct, return it unchanged.\n\n"
+        f"Subject hint: {subject or 'General'}\nTitle hint: {title or 'Uploaded schema'}\n"
+        f"Fallback per-question mark: {default_marks:g}\n"
+        f"Draft schema JSON:\n{json.dumps(draft_schema, ensure_ascii=False)}"
+    )
+    content: list[dict[str, str]] = [{"type": "input_text", "text": prompt}]
+    content.extend(_content_for_paths(client, "Question paper", question_paper_paths))
+    content.extend(_content_for_paths(client, "Answer scheme", schema_paths))
+
+    try:
+        response = client.responses.create(
+            model=settings.openai_schema_model,
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the exam blueprint verification agent. Be conservative and "
+                        "evidence-based. Repair extraction mistakes, but do not invent a different paper."
+                    ),
+                },
+                {"role": "user", "content": content},
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "bmsitai_schema_verification",
+                    "strict": True,
+                    "schema": SCHEMA_EXTRACTION_SCHEMA,
+                }
+            },
+        )
+    except OpenAIError as exc:
+        raise RuntimeError(_openai_error_message(exc)) from exc
+
+    text = _extract_text(response)
+    if not text:
+        raise RuntimeError("OpenAI returned an empty schema verification response.")
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("OpenAI returned invalid JSON for the schema verification.") from exc
+
+
 def evaluate_submission_with_openai(
     *,
     exam: dict[str, Any],
@@ -354,6 +419,7 @@ def evaluate_submission_with_openai(
         "subject": exam["subject"],
         "total_marks": exam["total_marks"],
         "max_questions_to_grade": exam.get("max_questions_to_grade"),
+        "choice_rules": exam.get("choice_rules", []),
         "instructions": exam.get("instructions", ""),
         "questions": exam["questions"],
     }
@@ -451,6 +517,7 @@ def verify_evaluation_with_openai(
         "subject": exam["subject"],
         "total_marks": exam["total_marks"],
         "max_questions_to_grade": exam.get("max_questions_to_grade"),
+        "choice_rules": exam.get("choice_rules", []),
         "instructions": exam.get("instructions", ""),
         "questions": exam["questions"],
     }

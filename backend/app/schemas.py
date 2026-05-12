@@ -100,6 +100,12 @@ class ExamCreate(BaseModel):
         ids = [question.id for question in self.questions]
         if len(ids) != len(set(ids)):
             raise ValueError("Question IDs must be unique.")
+        part_ids = [part.id for question in self.questions for part in question.parts]
+        overlapping_ids = set(ids).intersection(part_ids)
+        if overlapping_ids:
+            raise ValueError("Question part IDs cannot duplicate parent question IDs.")
+        if len(part_ids) != len(set(part_ids)):
+            raise ValueError("Question part IDs must be unique.")
         if self.max_questions_to_grade and self.max_questions_to_grade > len(self.questions):
             raise ValueError("Questions to grade cannot exceed available questions.")
         if self.total_marks is None:

@@ -25,6 +25,7 @@ def make_client(tmp_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setattr(main.settings, "teacher_email", "teacher@bmsit.ac.in")
     monkeypatch.setattr(main.settings, "teacher_password", "test-teacher-password")
     monkeypatch.setattr(main.settings, "auth_secret", "test-secret")
+    monkeypatch.setattr(main, "verify_schema_with_openai", lambda **kwargs: kwargs["draft_schema"])
     monkeypatch.setattr(main, "verify_evaluation_with_openai", lambda **kwargs: kwargs["draft_result"])
     return TestClient(main.app)
 
@@ -136,6 +137,10 @@ def test_create_exam_rejects_empty_schema(tmp_path, monkeypatch):
     assert response.status_code == 422
 
 
+def test_attempt_hints_normalize_common_question_formats():
+    assert main._parse_attempt_hints("Q.1(a), question 2(ii); 3b") == ["Q1.a", "Q2.ii", "Q3.b"]
+
+
 def test_schema_image_creates_exam(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch)
 
@@ -237,6 +242,64 @@ def test_schema_extract_accepts_question_paper_and_nested_parts(tmp_path, monkey
     assert [part["id"] for part in payload["questions"][0]["parts"]] == ["Q1.a", "Q1.b"]
 
 
+def test_schema_extraction_uses_verifier_repair_pass(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    captured: dict[str, str] = {}
+
+    def fake_schema_extractor(**kwargs):
+        return {
+            "title": "Draft Paper",
+            "subject": "Computer Vision",
+            "instructions": "Answer all questions.",
+            "total_marks": 40,
+            "max_questions_to_grade": None,
+            "choice_rule": "Answer all questions.",
+            "questions": [
+                {
+                    "id": "Q1",
+                    "text": "Question 1",
+                    "max_marks": 40,
+                    "model_answer": "Model answer 1",
+                    "marking_rules": "",
+                    "keywords": [],
+                    "parts": [],
+                }
+            ],
+        }
+
+    def fake_schema_verifier(**kwargs):
+        captured["draft_title"] = kwargs["draft_schema"]["title"]
+        return {
+            **kwargs["draft_schema"],
+            "title": "Verified Paper",
+            "max_questions_to_grade": 1,
+            "choice_rule": "Answer any one question.",
+            "choice_rules": [
+                {
+                    "type": "best_n",
+                    "count": 1,
+                    "question_ids": ["Q1"],
+                    "description": "Answer any one question.",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(main, "extract_schema_with_openai", fake_schema_extractor)
+    monkeypatch.setattr(main, "verify_schema_with_openai", fake_schema_verifier)
+    response = client.post(
+        "/schema/extract",
+        data={"subject": "Computer Vision", "title": "Verifier Test"},
+        files={"file": ("schema.pdf", b"fake-schema-pdf", "application/pdf")},
+        headers=teacher_headers(client),
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert captured["draft_title"] == "Draft Paper"
+    assert payload["title"] == "Verified Paper"
+    assert payload["choice_rules"][0]["description"] == "Answer any one question."
+
+
 def test_schema_choice_rule_normalizes_total_and_per_question_marks(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch)
 
@@ -322,7 +385,10 @@ def test_schema_total_marks_overrides_wrong_all_questions_extraction(tmp_path, m
     assert payload["total_marks"] == 40
     assert payload["max_questions_to_grade"] == 4
     assert payload["choice_rules"][0]["type"] == "best_n"
-    assert all(question["max_marks"] == 10 for question in payload["questions"])
+    marks_by_id = {question["id"]: question["max_marks"] for question in payload["questions"]}
+    assert marks_by_id["3"] == 10
+    assert marks_by_id["5"] == 5
+    assert marks_by_id["1"] == 10
     assert "answer all questions" not in payload["instructions"].lower()
     assert "best 4 of 8" in payload["instructions"].lower()
 
@@ -567,6 +633,17 @@ def test_part_level_evaluator_output_rolls_up_to_parent_question(tmp_path, monke
             "student_name": "Asha",
             "usn": "1BM22CS101",
             "questions": [
+                {
+                    "question_id": "Q1",
+                    "answer_text": "No distinct answer visible.",
+                    "attempted": False,
+                    "score": 0,
+                    "max_marks": 10,
+                    "reason": "Parent row missed the subpart answers.",
+                    "missing_points": [],
+                    "confidence": 45,
+                    "review_required": True,
+                },
                 {
                     "question_id": "Q1.a",
                     "answer_text": "Student answer for part a.",

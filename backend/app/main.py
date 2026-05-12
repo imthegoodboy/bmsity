@@ -24,6 +24,7 @@ from .ai import (
     extract_schema_with_openai,
     ensure_openai_ready,
     verify_evaluation_with_openai,
+    verify_schema_with_openai,
 )
 from .database import get_db, init_db, json_loads, row_to_dict, rows_to_dicts
 from .reports import generate_report
@@ -498,6 +499,14 @@ async def create_exam_from_schema_image(
             title=title.strip() or "Answer Schema",
             default_marks=fallback_marks,
         )
+        extracted = verify_schema_with_openai(
+            schema_paths=schema_paths,
+            question_paper_paths=question_paths,
+            draft_schema=extracted,
+            subject=subject.strip() or "General",
+            title=title.strip() or "Answer Schema",
+            default_marks=fallback_marks,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -900,7 +909,14 @@ def _parse_attempt_hints(value: str) -> list[str]:
 
 def _canonical_question_key(value: Any) -> str:
     text = re.sub(r"\s+", "", str(value or "").strip()).upper()
-    text = text.replace("QUESTION", "Q").replace("ANSWER", "").replace("ANS", "")
+    text = (
+        text.replace("QUESTIONNO", "Q")
+        .replace("QUESTION", "Q")
+        .replace("QNO", "Q")
+        .replace("ANSWER", "")
+        .replace("ANS", "")
+    )
+    text = re.sub(r"^Q[\.\-:]+", "Q", text)
     text = text.strip(":.")
     if not text:
         return ""
@@ -1196,7 +1212,9 @@ def _normalize_schema_questions(
             for question in questions:
                 mark = float(question["max_marks"])
                 near_expected = abs(mark - expected_per_question) / expected_per_question <= 0.25
-                if 0 < mark < expected_per_question or near_expected:
+                high_outlier = mark > expected_per_question and near_expected
+                fallback_outlier = abs(mark - default_marks) < 0.01 and default_marks > expected_per_question * 1.5
+                if high_outlier or fallback_outlier:
                     question["max_marks"] = expected_per_question
 
     if not total_marks:
@@ -1365,7 +1383,7 @@ def _merge_part_level_evaluations(
             part_groups.setdefault(group_parent_id, []).append((part, raw_item))
 
     for parent_id, items in part_groups.items():
-        if parent_id in top_level_items:
+        if parent_id in top_level_items and _evaluation_item_attempted(top_level_items[parent_id]):
             continue
         attempted_parts = [
             (part, item)
