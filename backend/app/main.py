@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from .ai import (
+    detect_attempted_questions_with_openai,
     evaluate_submission_with_openai,
     extract_schema_with_openai,
     ensure_openai_ready,
@@ -135,6 +136,19 @@ class AuthUser:
     role: str
     subject: str
     force_password_change: bool = False
+
+
+@dataclass(frozen=True)
+class CheckingScope:
+    ids: tuple[str, ...]
+    parent_ids: frozenset[str]
+    whole_parent_ids: frozenset[str]
+    part_ids_by_parent: dict[str, frozenset[str]]
+    limited: bool = False
+
+    @property
+    def active(self) -> bool:
+        return self.limited or bool(self.ids)
 
 
 def _decode_token(token: str) -> AuthUser:
@@ -1008,39 +1022,65 @@ def _parse_attempt_hints(value: str, valid_question_ids: list[str] | None = None
         if canonical:
             valid_lookup[canonical] = cleaned_id
 
-    def add_hint(raw_hint: str) -> None:
+    def add_hint(raw_hint: str) -> bool:
         canonical = _canonical_question_key(raw_hint)
         if not canonical or not re.search(r"\d", canonical):
-            return
+            return False
         normalized = canonical
         if valid_lookup:
             normalized = valid_lookup.get(raw_hint.strip().upper()) or valid_lookup.get(canonical) or ""
             if not normalized:
-                return
+                return False
         dedupe_key = _canonical_question_key(normalized) or normalized.upper()
         if dedupe_key not in seen:
             seen.add(dedupe_key)
             hints.append(normalized)
+        return True
 
-    consumed: list[tuple[int, int]] = []
+    def add_part_continuation(question_number: str, part_token: str) -> bool:
+        cleaned_part = part_token.strip().strip("().,:;")
+        if not cleaned_part:
+            return False
+        if add_hint(f"Q{question_number}.{cleaned_part}"):
+            return True
+        is_compact_letter_group = (
+            bool(valid_lookup)
+            and cleaned_part.isalpha()
+            and len(cleaned_part) > 1
+            and not re.fullmatch(r"[ivxIVX]+", cleaned_part)
+        )
+        if is_compact_letter_group:
+            added = False
+            for label in cleaned_part:
+                added = add_hint(f"Q{question_number}.{label}") or added
+            return added
+        return False
+
+    def process_free_text(text: str, current_question_number: str | None) -> str | None:
+        last_question_number = current_question_number
+        for token in re.split(r"[,;\n/|]+|\s+|\band\b|\bor\b", text, flags=re.IGNORECASE):
+            cleaned = token.strip().strip("().,:;")
+            if not cleaned:
+                continue
+            match = COMPACT_QUESTION_REF_RE.fullmatch(cleaned)
+            if match:
+                number, part = match.groups()
+                if add_hint(f"Q{number}{'.' + part if part else ''}"):
+                    last_question_number = number
+                continue
+            if last_question_number and re.fullmatch(r"[a-zA-Z]{1,6}|[ivxIVX]{1,6}", cleaned):
+                add_part_continuation(last_question_number, cleaned)
+        return last_question_number
+
+    last_question_number: str | None = None
+    position = 0
     for match in EXPLICIT_QUESTION_REF_RE.finditer(value):
+        last_question_number = process_free_text(value[position:match.start()], last_question_number)
         number, part = match.groups()
-        add_hint(f"Q{number}{'.' + part if part else ''}")
-        consumed.append(match.span())
-
-    remainder = list(value)
-    for start, end in consumed:
-        for index in range(start, end):
-            remainder[index] = " "
-    for token in re.split(r"[,;\n/|]+|\s+|\band\b|\bor\b", "".join(remainder), flags=re.IGNORECASE):
-        cleaned = token.strip().strip("().,:;")
-        if not cleaned:
-            continue
-        match = COMPACT_QUESTION_REF_RE.fullmatch(cleaned)
-        if not match:
-            continue
-        number, part = match.groups()
-        add_hint(f"Q{number}{'.' + part if part else ''}")
+        if add_hint(f"Q{number}{'.' + part if part else ''}"):
+            last_question_number = number
+        position = match.end()
+    process_free_text(value[position:], last_question_number)
     return hints[:40]
 
 
@@ -1095,6 +1135,177 @@ def _part_parent_lookup(
             if label:
                 lookup[_canonical_question_key(f"{parent_id}.{label}")] = (parent_id, part)
     return {key: value for key, value in lookup.items() if key}
+
+
+def _question_scope_from_hints(
+    questions: list[dict[str, Any]],
+    attempt_hints: list[str],
+) -> CheckingScope:
+    question_lookup = _question_id_lookup(questions)
+    part_lookup = _part_parent_lookup(questions)
+    scoped_ids: list[str] = []
+    parent_ids: set[str] = set()
+    whole_parent_ids: set[str] = set()
+    part_ids_by_parent: dict[str, set[str]] = {}
+    for hint in attempt_hints:
+        hint_text = str(hint or "").strip()
+        if not hint_text:
+            continue
+        canonical = _canonical_question_key(hint_text)
+        parent_id = question_lookup.get(hint_text) or question_lookup.get(canonical)
+        if parent_id:
+            parent_ids.add(parent_id)
+            whole_parent_ids.add(parent_id)
+            if parent_id not in scoped_ids:
+                scoped_ids.append(parent_id)
+            continue
+        part_entry = part_lookup.get(hint_text) or part_lookup.get(canonical)
+        if part_entry:
+            part_parent_id, part = part_entry
+            part_id = str(part.get("id") or "").strip()
+            if not part_id:
+                continue
+            parent_ids.add(part_parent_id)
+            part_ids_by_parent.setdefault(part_parent_id, set()).add(part_id)
+            if part_id not in scoped_ids:
+                scoped_ids.append(part_id)
+    return CheckingScope(
+        ids=tuple(scoped_ids),
+        parent_ids=frozenset(parent_ids),
+        whole_parent_ids=frozenset(whole_parent_ids),
+        part_ids_by_parent={
+            parent_id: frozenset(part_ids)
+            for parent_id, part_ids in part_ids_by_parent.items()
+        },
+        limited=bool(scoped_ids),
+    )
+
+
+def _scope_allows_parent(scope: CheckingScope, parent_id: str) -> bool:
+    return not scope.active or parent_id in scope.parent_ids
+
+
+def _scope_allows_part(scope: CheckingScope, parent_id: str, part_id: str) -> bool:
+    if not scope.active:
+        return True
+    if parent_id in scope.whole_parent_ids:
+        return True
+    return part_id in scope.part_ids_by_parent.get(parent_id, frozenset())
+
+
+def _scope_requires_part_level(scope: CheckingScope, parent_id: str) -> bool:
+    return (
+        scope.active
+        and parent_id not in scope.whole_parent_ids
+        and bool(scope.part_ids_by_parent.get(parent_id))
+    )
+
+
+def _scope_max_marks_for_question(question: dict[str, Any], scope: CheckingScope) -> float:
+    parent_id = str(question["id"])
+    if not _scope_requires_part_level(scope, parent_id):
+        return float(question["max_marks"])
+    allowed_part_ids = scope.part_ids_by_parent.get(parent_id, frozenset())
+    scoped_total = sum(
+        float(part.get("max_marks") or 0)
+        for part in question.get("parts") or []
+        if str(part.get("id") or "") in allowed_part_ids
+    )
+    return scoped_total if scoped_total > 0 else float(question["max_marks"])
+
+
+def _empty_checking_scope() -> CheckingScope:
+    return CheckingScope((), frozenset(), frozenset(), {})
+
+
+def _empty_limited_checking_scope() -> CheckingScope:
+    return CheckingScope((), frozenset(), frozenset(), {}, limited=True)
+
+
+def _checking_scope_intersection(
+    first: CheckingScope,
+    second: CheckingScope,
+    questions: list[dict[str, Any]],
+) -> CheckingScope:
+    if not first.active:
+        return second
+    if not second.active:
+        return first
+
+    scoped_ids: list[str] = []
+    parent_ids: set[str] = set()
+    whole_parent_ids: set[str] = set()
+    part_ids_by_parent: dict[str, set[str]] = {}
+
+    def add_parent(parent_id: str) -> None:
+        parent_ids.add(parent_id)
+        whole_parent_ids.add(parent_id)
+        if parent_id not in scoped_ids:
+            scoped_ids.append(parent_id)
+
+    def add_part(parent_id: str, part_id: str) -> None:
+        parent_ids.add(parent_id)
+        part_ids_by_parent.setdefault(parent_id, set()).add(part_id)
+        if part_id not in scoped_ids:
+            scoped_ids.append(part_id)
+
+    for question in questions:
+        parent_id = str(question["id"])
+        if not _scope_allows_parent(first, parent_id) or not _scope_allows_parent(second, parent_id):
+            continue
+        first_whole = parent_id in first.whole_parent_ids
+        second_whole = parent_id in second.whole_parent_ids
+        parts = [str(part.get("id") or "") for part in question.get("parts") or []]
+        parts = [part_id for part_id in parts if part_id]
+
+        if first_whole and second_whole:
+            add_parent(parent_id)
+        elif first_whole:
+            for part_id in second.part_ids_by_parent.get(parent_id, frozenset()):
+                add_part(parent_id, part_id)
+            if not second.part_ids_by_parent.get(parent_id) and not parts:
+                add_parent(parent_id)
+        elif second_whole:
+            for part_id in first.part_ids_by_parent.get(parent_id, frozenset()):
+                add_part(parent_id, part_id)
+            if not first.part_ids_by_parent.get(parent_id) and not parts:
+                add_parent(parent_id)
+        else:
+            shared_parts = first.part_ids_by_parent.get(parent_id, frozenset()).intersection(
+                second.part_ids_by_parent.get(parent_id, frozenset())
+            )
+            for part_id in shared_parts:
+                add_part(parent_id, part_id)
+
+    return CheckingScope(
+        ids=tuple(scoped_ids),
+        parent_ids=frozenset(parent_ids),
+        whole_parent_ids=frozenset(whole_parent_ids),
+        part_ids_by_parent={
+            parent_id: frozenset(part_ids)
+            for parent_id, part_ids in part_ids_by_parent.items()
+        },
+        limited=True,
+    )
+
+
+def _detected_question_ids(result: dict[str, Any]) -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    for key in ("attempted_question_ids", "uncertain_question_ids"):
+        raw_ids = result.get(key, [])
+        if not isinstance(raw_ids, list):
+            continue
+        for raw_id in raw_ids:
+            question_id = str(raw_id or "").strip()
+            if not question_id:
+                continue
+            dedupe_key = _canonical_question_key(question_id) or question_id.upper()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            ids.append(question_id)
+    return ids
 
 
 def _clean_choice_rules(
@@ -1470,7 +1681,7 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
     rows = rows_to_dicts(
         conn.execute(
             """
-            SELECT id, question_id, answer_text, attempted, final_score, max_marks, confidence
+            SELECT id, question_id, answer_text, attempted, final_score, max_marks, confidence, reason
             FROM evaluations
             WHERE submission_id = ?
             """,
@@ -1486,12 +1697,24 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
 
     def row_attempted(row: dict[str, Any]) -> bool:
         return (
-            not _missing_answer_text(str(row.get("answer_text") or ""))
-            or _as_float(row["final_score"]) > 0
+            bool(row.get("attempted"))
+            and (
+                not _missing_answer_text(str(row.get("answer_text") or ""))
+                or _as_float(row["final_score"]) > 0
+            )
         )
 
+    def row_in_checking_scope(row: dict[str, Any]) -> bool:
+        return not str(row.get("reason") or "").startswith("Skipped because")
+
+    has_limited_scope = any(not row_in_checking_scope(row) for row in rows)
+
     if choice_rules:
-        rows_by_question = {str(row["question_id"]): row for row in rows}
+        rows_by_question = {
+            str(row["question_id"]): row
+            for row in rows
+            if row_in_checking_scope(row)
+        }
         all_rule_candidates: list[dict[str, Any]] = []
         total_capacity_ids: set[str] = set()
         for rule in choice_rules:
@@ -1532,7 +1755,7 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
         total_score = sum(_as_float(row["final_score"]) for row in selected_rows)
         computed_total_marks = sum(_as_float(row["max_marks"]) for row in rows if row["id"] in total_capacity_ids)
         exam_total = _as_float(exam["total_marks"]) if exam else 0
-        total_marks = exam_total if exam_total > 0 else computed_total_marks
+        total_marks = computed_total_marks if has_limited_scope else exam_total if exam_total > 0 else computed_total_marks
         total_score = _clamp(total_score, 0, total_marks) if total_marks else total_score
         confidence_rows = selected_rows or all_rule_candidates or rows
     elif exam and exam.get("max_questions_to_grade"):
@@ -1540,7 +1763,7 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
         candidates = [
             row
             for row in rows
-            if row_attempted(row)
+            if row_in_checking_scope(row) and row_attempted(row)
         ]
         selected = sorted(
             candidates,
@@ -1549,14 +1772,24 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
         )[: int(max_questions)]
         selected_ids = {row["id"] for row in selected}
         total_score = sum(_as_float(row["final_score"]) for row in selected)
-        total_marks = _as_float(exam["total_marks"]) if exam else sum(_as_float(row["max_marks"]) for row in selected)
+        scoped_capacity = sum(
+            _as_float(row["max_marks"])
+            for row in sorted(
+                [row for row in rows if row_in_checking_scope(row)],
+                key=lambda row: _as_float(row["max_marks"]),
+                reverse=True,
+            )[: int(max_questions)]
+        )
+        exam_total = _as_float(exam["total_marks"]) if exam else 0
+        total_marks = scoped_capacity if has_limited_scope else exam_total or sum(_as_float(row["max_marks"]) for row in selected)
         total_score = _clamp(total_score, 0, total_marks)
         confidence_rows = selected or candidates or rows
     else:
-        selected_ids = {row["id"] for row in rows}
-        total_score = sum(_as_float(row["final_score"]) for row in rows)
-        total_marks = sum(_as_float(row["max_marks"]) for row in rows)
-        confidence_rows = rows
+        selected_ids = {row["id"] for row in rows if row_in_checking_scope(row)}
+        selected_rows = [row for row in rows if row["id"] in selected_ids]
+        total_score = sum(_as_float(row["final_score"]) for row in selected_rows)
+        total_marks = sum(_as_float(row["max_marks"]) for row in selected_rows)
+        confidence_rows = selected_rows
     avg_confidence = (
         sum(_as_float(row["confidence"]) for row in confidence_rows) / len(confidence_rows)
         if confidence_rows
@@ -1578,6 +1811,8 @@ def _recalculate_submission(conn: Any, submission_id: str) -> None:
 
 
 def _evaluation_item_attempted(item: dict[str, Any]) -> bool:
+    if "attempted" in item and not bool(item.get("attempted")):
+        return False
     answer_text = str(item.get("answer_text", ""))
     return not _missing_answer_text(answer_text)
 
@@ -1586,7 +1821,9 @@ def _merge_part_level_evaluations(
     *,
     result: dict[str, Any],
     questions: list[dict[str, Any]],
+    scope: CheckingScope | None = None,
 ) -> dict[str, dict[str, Any]]:
+    scope = scope or _empty_checking_scope()
     question_lookup = _question_id_lookup(questions)
     part_lookup = _part_parent_lookup(questions)
     top_level_items: dict[str, dict[str, Any]] = {}
@@ -1599,11 +1836,16 @@ def _merge_part_level_evaluations(
         canonical_id = _canonical_question_key(raw_question_id)
         parent_id = question_lookup.get(raw_question_id) or question_lookup.get(canonical_id)
         if parent_id:
+            if not _scope_allows_parent(scope, parent_id) or _scope_requires_part_level(scope, parent_id):
+                continue
             top_level_items.setdefault(parent_id, raw_item)
             continue
         part_entry = part_lookup.get(raw_question_id) or part_lookup.get(canonical_id)
         if part_entry:
             group_parent_id, part = part_entry
+            part_id = str(part.get("id") or "")
+            if not _scope_allows_part(scope, group_parent_id, part_id):
+                continue
             part_groups.setdefault(group_parent_id, []).append((part, raw_item))
 
     for parent_id, items in part_groups.items():
@@ -1680,40 +1922,127 @@ def _run_evaluation(submission_id: str) -> None:
             raise RuntimeError("Exam not found.")
         exam["questions"] = json_loads(exam["questions_json"], [])
         attempt_hints = json_loads(submission.get("attempt_hints_json", "[]"), [])
+        teacher_scope = _question_scope_from_hints(exam["questions"], attempt_hints)
         answer_paths = [Path(row["stored_path"]) for row in files]
-        draft_result = evaluate_submission_with_openai(
-            exam=exam,
-            student_name=submission["student_name"],
-            usn=submission["usn"],
-            file_paths=answer_paths,
-            attempt_hints=attempt_hints,
-        )
-        verifier_warning = ""
+        detector_warning = ""
+        detected_scope = _empty_checking_scope()
+        detector_completed = False
         try:
-            result = verify_evaluation_with_openai(
+            detection_result = detect_attempted_questions_with_openai(
                 exam=exam,
                 student_name=submission["student_name"],
                 usn=submission["usn"],
                 file_paths=answer_paths,
-                draft_result=draft_result,
-                attempt_hints=attempt_hints,
+                question_ids_to_check=list(teacher_scope.ids),
+            )
+            detector_completed = True
+            detected_scope = _question_scope_from_hints(
+                exam["questions"],
+                _detected_question_ids(detection_result),
             )
         except RuntimeError as exc:
-            result = draft_result
-            verifier_warning = f" Verification agent could not complete: {exc}"
+            detector_warning = f" Attempt detector could not complete: {exc}"
+
+        if teacher_scope.active and detected_scope.active:
+            checking_scope = _checking_scope_intersection(teacher_scope, detected_scope, exam["questions"])
+        elif teacher_scope.active and detector_completed:
+            checking_scope = _empty_limited_checking_scope()
+        elif teacher_scope.active:
+            checking_scope = teacher_scope
+        elif detected_scope.active:
+            checking_scope = detected_scope
+        elif detector_completed:
+            checking_scope = _empty_limited_checking_scope()
+        else:
+            checking_scope = _empty_checking_scope()
+        question_ids_to_check = list(checking_scope.ids)
+        verifier_warning = ""
+        if checking_scope.active and not question_ids_to_check:
+            result = {
+                "student_name": submission["student_name"],
+                "usn": submission["usn"],
+                "questions": [],
+                "summary": {
+                    "overall_feedback": "No attempted answers were detected in the verified checking scope.",
+                    "weak_areas": [],
+                },
+            }
+        else:
+            draft_result = evaluate_submission_with_openai(
+                exam=exam,
+                student_name=submission["student_name"],
+                usn=submission["usn"],
+                file_paths=answer_paths,
+                attempt_hints=attempt_hints,
+                question_ids_to_check=question_ids_to_check,
+            )
+            try:
+                result = verify_evaluation_with_openai(
+                    exam=exam,
+                    student_name=submission["student_name"],
+                    usn=submission["usn"],
+                    file_paths=answer_paths,
+                    draft_result=draft_result,
+                    attempt_hints=attempt_hints,
+                    question_ids_to_check=question_ids_to_check,
+                )
+            except RuntimeError as exc:
+                result = draft_result
+                verifier_warning = f" Verification agent could not complete: {exc}"
 
         question_map = {str(question["id"]): question for question in exam["questions"]}
         merged_items = _merge_part_level_evaluations(
             result=result,
             questions=exam["questions"],
+            scope=checking_scope,
         )
         created_at = now_iso()
         with get_db() as conn:
             conn.execute("DELETE FROM evaluations WHERE submission_id = ?", (submission_id,))
             for question_id, question in question_map.items():
                 item = merged_items.get(question_id)
-                if not item:
+                scoped_max_marks = _scope_max_marks_for_question(question, checking_scope)
+                if not _scope_allows_parent(checking_scope, question_id):
                     max_marks = float(question["max_marks"])
+                    if teacher_scope.active and not _scope_allows_parent(teacher_scope, question_id):
+                        skipped_reason = "Skipped because the teacher did not include this question in the questions to check."
+                    elif detector_completed and (
+                        not detected_scope.active
+                        or not _scope_allows_parent(detected_scope, question_id)
+                    ):
+                        skipped_reason = "Skipped because the attempted-question detector did not find a visible answer for this question."
+                    else:
+                        skipped_reason = "Skipped because this question was outside the verified checking scope."
+                    conn.execute(
+                        """
+                        INSERT INTO evaluations
+                        (id, submission_id, question_id, question_text, answer_text, attempted, counts_toward_total,
+                         score, max_marks, final_score, confidence, review_required, reason, missing_points_json,
+                         created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            new_id("eval"),
+                            submission_id,
+                            question_id,
+                            question["text"],
+                            "",
+                            0,
+                            0,
+                            0,
+                            max_marks,
+                            0,
+                            0,
+                            0,
+                            skipped_reason,
+                            json.dumps([]),
+                            created_at,
+                            created_at,
+                        ),
+                    )
+                    continue
+                if not item:
+                    max_marks = scoped_max_marks
                     conn.execute(
                         """
                         INSERT INTO evaluations
@@ -1742,7 +2071,7 @@ def _run_evaluation(submission_id: str) -> None:
                         ),
                     )
                     continue
-                max_marks = float(question["max_marks"])
+                max_marks = scoped_max_marks
                 answer_text = str(item.get("answer_text", ""))
                 raw_score = _clamp(_as_float(item.get("score")), 0, max_marks)
                 attempted = _evaluation_item_attempted({**item, "score": raw_score})
@@ -1780,6 +2109,8 @@ def _run_evaluation(submission_id: str) -> None:
                 )
             summary = result.get("summary", {})
             overall_feedback = str(summary.get("overall_feedback", ""))
+            if detector_warning:
+                overall_feedback = (overall_feedback + detector_warning).strip()
             if verifier_warning:
                 overall_feedback = (overall_feedback + verifier_warning).strip()
             conn.execute(

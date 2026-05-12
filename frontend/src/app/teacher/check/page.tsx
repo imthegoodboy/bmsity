@@ -185,11 +185,11 @@ export default function TeacherCheckPage() {
               </label>
             </div>
             <label>
-              <span className="label">Attempted questions, optional</span>
+              <span className="label">Questions to check</span>
               <input
                 className="field uppercase"
                 onChange={(event) => setAttemptHints(event.target.value)}
-                placeholder="Example: Q1, Q2, Q5, Q8"
+                placeholder="Example: Q1, 1a, Q2(ii), 3b"
                 value={attemptHints}
               />
             </label>
@@ -236,7 +236,7 @@ export default function TeacherCheckPage() {
                       <strong>Agent {index + 1}: {entry.studentName}</strong>
                       <span>
                         {entry.usn} - {entry.files.length} page{entry.files.length === 1 ? "" : "s"}
-                        {entry.attemptHints ? ` - hints: ${entry.attemptHints}` : ""}
+                        {entry.attemptHints ? ` - checks: ${entry.attemptHints}` : ""}
                       </span>
                     </div>
                     <div className="text-right">

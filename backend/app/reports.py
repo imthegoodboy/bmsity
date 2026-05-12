@@ -70,8 +70,11 @@ def _missing_answer_text(answer_text: str) -> bool:
 
 def _is_attempted(item: dict[str, Any]) -> bool:
     return (
-        (bool(item.get("attempted")) and not _missing_answer_text(str(item.get("answer_text") or "")))
-        or _as_float(item.get("final_score")) > 0
+        bool(item.get("attempted"))
+        and (
+            not _missing_answer_text(str(item.get("answer_text") or ""))
+            or _as_float(item.get("final_score")) > 0
+        )
     )
 
 
@@ -134,7 +137,19 @@ def generate_report(
                     f"{_as_float(item.get('final_score')):g}/{_as_float(item.get('max_marks')):g}",
                     f"{_as_float(item.get('confidence')):g}%",
                     status,
-                    Paragraph(_feedback_text(item), styles["BodyText"]),
+                    Paragraph(
+                        "<br/>".join(
+                            part
+                            for part in [
+                                _feedback_text(item),
+                                escape(f"Answer evidence: {str(item.get('answer_text') or '').strip()}")
+                                if str(item.get("answer_text") or "").strip()
+                                else "",
+                            ]
+                            if part
+                        ),
+                        styles["BodyText"],
+                    ),
                 ]
             )
 

@@ -26,6 +26,11 @@ def make_client(tmp_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setattr(main.settings, "teacher_password", "test-teacher-password")
     monkeypatch.setattr(main.settings, "auth_secret", "test-secret")
     monkeypatch.setattr(main, "verify_schema_with_openai", lambda **kwargs: kwargs["draft_schema"])
+    monkeypatch.setattr(
+        main,
+        "detect_attempted_questions_with_openai",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("Detector skipped in test.")),
+    )
     monkeypatch.setattr(main, "verify_evaluation_with_openai", lambda **kwargs: kwargs["draft_result"])
     return TestClient(main.app)
 
@@ -116,10 +121,10 @@ def create_exam(client: TestClient) -> dict:
     return response.json()
 
 
-def upload_submission(client: TestClient, exam_id: str) -> dict:
+def upload_submission(client: TestClient, exam_id: str, attempt_hints: str = "") -> dict:
     response = client.post(
         f"/exams/{exam_id}/submissions",
-        data={"student_name": "Asha", "usn": "1BM22CS101"},
+        data={"student_name": "Asha", "usn": "1BM22CS101", "attempt_hints": attempt_hints},
         files={"files": ("sheet.png", b"fake-image", "image/png")},
         headers=teacher_headers(client),
     )
@@ -228,6 +233,18 @@ def test_attempt_hints_accept_free_text_and_filter_to_exam_questions():
         "student solved question 2(ii) Q.1(a) 3b and 40 marks",
         valid_question_ids=main._question_hint_ids(questions),
     ) == ["Q2.ii", "Q1.a", "Q3.b"]
+
+
+def test_attempt_hints_resolve_shorthand_subpart_groups():
+    questions = [
+        {"id": "Q1", "parts": [{"id": "Q1.a"}, {"id": "Q1.b"}]},
+        {"id": "Q2", "parts": [{"id": "Q2.ii"}, {"id": "Q2.iv"}]},
+    ]
+
+    assert main._parse_attempt_hints(
+        "1a,ab; question 2(ii,iv)",
+        valid_question_ids=main._question_hint_ids(questions),
+    ) == ["Q1.a", "Q1.b", "Q2.ii", "Q2.iv"]
 
 
 def test_nonfinite_ai_numbers_fall_back_safely():
@@ -817,6 +834,348 @@ def test_agent_placeholder_attempt_is_not_counted_or_reported(tmp_path, monkeypa
     assert captured["question_ids"] == ["Q2"]
 
 
+def test_attempted_false_with_hallucinated_answer_is_not_counted(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    exam = create_exam(client)
+    submission = upload_submission(client, exam["id"])
+
+    def fake_evaluator(**kwargs):
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "questions": [
+                {
+                    "question_id": "Q1",
+                    "answer_text": "Velocity is speed with direction.",
+                    "attempted": False,
+                    "score": 2,
+                    "max_marks": 2,
+                    "reason": "This should be rejected because attempted is false.",
+                    "missing_points": [],
+                    "confidence": 92,
+                    "review_required": False,
+                },
+                {
+                    "question_id": "Q2",
+                    "answer_text": "Acceleration is the rate of change of velocity.",
+                    "attempted": True,
+                    "score": 3,
+                    "max_marks": 3,
+                    "reason": "Correct.",
+                    "missing_points": [],
+                    "confidence": 94,
+                    "review_required": False,
+                },
+            ],
+            "summary": {"overall_feedback": "One verified answer.", "weak_areas": []},
+        }
+
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+    headers = teacher_headers(client)
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+
+    fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
+    q1 = next(item for item in fetched["evaluations"] if item["question_id"] == "Q1")
+    assert q1["attempted"] is False
+    assert q1["answer_text"] == ""
+    assert q1["final_score"] == 0
+    assert fetched["total_score"] == 3
+
+
+def test_teacher_question_hints_are_authoritative_scope(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    headers = teacher_headers(client)
+    exam_response = client.post("/exams", json=choice_exam_payload(), headers=headers)
+    assert exam_response.status_code == 200, exam_response.text
+    exam = exam_response.json()
+    submission = upload_submission(client, exam["id"], attempt_hints="Q1, Q3, Q5")
+    captured: dict[str, list[str]] = {}
+
+    def fake_evaluator(**kwargs):
+        captured["evaluator_scope"] = kwargs["question_ids_to_check"]
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "questions": [
+                {
+                    "question_id": f"Q{index}",
+                    "answer_text": f"Student answer {index}",
+                    "attempted": True,
+                    "score": score,
+                    "max_marks": 10,
+                    "reason": "Checked.",
+                    "missing_points": [],
+                    "confidence": 90,
+                    "review_required": False,
+                }
+                for index, score in enumerate([8, 10, 6, 10, 9, 10, 10, 10], start=1)
+            ],
+            "summary": {"overall_feedback": "Scoped checking.", "weak_areas": []},
+        }
+
+    def fake_verifier(**kwargs):
+        captured["verifier_scope"] = kwargs["question_ids_to_check"]
+        return kwargs["draft_result"]
+
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+    monkeypatch.setattr(main, "verify_evaluation_with_openai", fake_verifier)
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+
+    fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
+    assert captured["evaluator_scope"] == ["Q1", "Q3", "Q5"]
+    assert captured["verifier_scope"] == ["Q1", "Q3", "Q5"]
+    assert fetched["total_score"] == 23
+    assert fetched["total_marks"] == 30
+    attempted = {item["question_id"] for item in fetched["evaluations"] if item["attempted"]}
+    assert attempted == {"Q1", "Q3", "Q5"}
+    q2 = next(item for item in fetched["evaluations"] if item["question_id"] == "Q2")
+    assert q2["attempted"] is False
+    assert q2["final_score"] == 0
+    assert "teacher did not include" in q2["reason"]
+
+    report_capture: dict[str, list[str]] = {}
+
+    def fake_generate_report(**kwargs):
+        report_capture["question_ids"] = [item["question_id"] for item in kwargs["evaluations"]]
+        destination = kwargs["destination"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"%PDF-1.4\n%%EOF")
+        return destination
+
+    monkeypatch.setattr(main, "generate_report", fake_generate_report)
+    report = client.get(f"/submissions/{submission['id']}/report", headers=headers)
+    assert report.status_code == 200
+    assert report_capture["question_ids"] == ["Q1", "Q3", "Q5"]
+
+
+def test_teacher_subpart_scope_does_not_award_sibling_parts(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    headers = teacher_headers(client)
+    exam_response = client.post(
+        "/exams",
+        json={
+            "title": "Subpart Scope Test",
+            "subject": "Computer Vision",
+            "questions": [
+                {
+                    "id": "Q1",
+                    "text": "Answer both subparts.",
+                    "max_marks": 10,
+                    "model_answer": "Use part rubrics.",
+                    "parts": [
+                        {
+                            "id": "Q1.a",
+                            "label": "a",
+                            "text": "Part a",
+                            "max_marks": 5,
+                            "model_answer": "Answer a",
+                        },
+                        {
+                            "id": "Q1.b",
+                            "label": "b",
+                            "text": "Part b",
+                            "max_marks": 5,
+                            "model_answer": "Answer b",
+                        },
+                    ],
+                }
+            ],
+        },
+        headers=headers,
+    )
+    assert exam_response.status_code == 200, exam_response.text
+    submission = upload_submission(client, exam_response.json()["id"], attempt_hints="1a")
+    captured: dict[str, list[str]] = {}
+
+    def fake_evaluator(**kwargs):
+        captured["scope"] = kwargs["question_ids_to_check"]
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "questions": [
+                {
+                    "question_id": "Q1.a",
+                    "answer_text": "Student answer for part a.",
+                    "attempted": True,
+                    "score": 4,
+                    "max_marks": 5,
+                    "reason": "Part a mostly correct.",
+                    "missing_points": [],
+                    "confidence": 92,
+                    "review_required": False,
+                },
+                {
+                    "question_id": "Q1.b",
+                    "answer_text": "Student answer for part b.",
+                    "attempted": True,
+                    "score": 5,
+                    "max_marks": 5,
+                    "reason": "Part b should be outside scope.",
+                    "missing_points": [],
+                    "confidence": 92,
+                    "review_required": False,
+                },
+            ],
+            "summary": {"overall_feedback": "Subpart scoped.", "weak_areas": []},
+        }
+
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+
+    fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
+    q1 = fetched["evaluations"][0]
+    assert captured["scope"] == ["Q1.a"]
+    assert fetched["total_score"] == 4
+    assert fetched["total_marks"] == 5
+    assert q1["max_marks"] == 5
+    assert q1["final_score"] == 4
+    assert "Q1.a" in q1["answer_text"]
+    assert "Q1.b" not in q1["answer_text"]
+
+
+def test_attempt_detector_limits_unhinted_grading_to_solved_questions(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    headers = teacher_headers(client)
+    exam_response = client.post("/exams", json=choice_exam_payload(), headers=headers)
+    assert exam_response.status_code == 200, exam_response.text
+    exam = exam_response.json()
+    submission = upload_submission(client, exam["id"])
+    captured: dict[str, list[str]] = {}
+
+    def fake_detector(**kwargs):
+        captured["detector_scope"] = kwargs["question_ids_to_check"]
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "attempted_question_ids": ["1", "3"],
+            "uncertain_question_ids": [],
+            "evidence": [
+                {
+                    "question_id": "1",
+                    "answer_locator": "Page 1 heading 1",
+                    "confidence": 94,
+                    "reason": "Visible answer region.",
+                },
+                {
+                    "question_id": "3",
+                    "answer_locator": "Page 2 heading 3",
+                    "confidence": 91,
+                    "reason": "Visible answer region.",
+                },
+            ],
+            "summary": "Detected Q1 and Q3.",
+        }
+
+    def fake_evaluator(**kwargs):
+        captured["grader_scope"] = kwargs["question_ids_to_check"]
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "questions": [
+                {
+                    "question_id": f"Q{index}",
+                    "answer_text": f"Student answer {index}",
+                    "attempted": True,
+                    "score": score,
+                    "max_marks": 10,
+                    "reason": "Checked.",
+                    "missing_points": [],
+                    "confidence": 90,
+                    "review_required": False,
+                }
+                for index, score in enumerate([8, 10, 6, 10, 9, 10, 10, 10], start=1)
+            ],
+            "summary": {"overall_feedback": "Detector scoped checking.", "weak_areas": []},
+        }
+
+    monkeypatch.setattr(main, "detect_attempted_questions_with_openai", fake_detector)
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+
+    fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
+    assert captured["detector_scope"] == []
+    assert captured["grader_scope"] == ["Q1", "Q3"]
+    assert fetched["total_score"] == 14
+    assert fetched["total_marks"] == 20
+    attempted = {item["question_id"] for item in fetched["evaluations"] if item["attempted"]}
+    assert attempted == {"Q1", "Q3"}
+    q2 = next(item for item in fetched["evaluations"] if item["question_id"] == "Q2")
+    assert q2["attempted"] is False
+    assert "detector did not find" in q2["reason"]
+
+
+def test_empty_attempt_detector_result_grades_no_questions(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    headers = teacher_headers(client)
+    exam_response = client.post("/exams", json=choice_exam_payload(), headers=headers)
+    assert exam_response.status_code == 200, exam_response.text
+    exam = exam_response.json()
+    submission = upload_submission(client, exam["id"])
+
+    def fake_detector(**kwargs):
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "attempted_question_ids": [],
+            "uncertain_question_ids": [],
+            "evidence": [],
+            "summary": "No visible attempted answers.",
+        }
+
+    def fake_evaluator(**kwargs):
+        raise AssertionError("grader should not run when detector found no attempted answers")
+
+    monkeypatch.setattr(main, "detect_attempted_questions_with_openai", fake_detector)
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+
+    fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
+    assert fetched["total_score"] == 0
+    assert fetched["total_marks"] == 0
+    assert not any(item["attempted"] for item in fetched["evaluations"])
+    assert all("detector did not find" in item["reason"] for item in fetched["evaluations"])
+
+
+def test_empty_detector_inside_teacher_scope_grades_no_questions(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch)
+    headers = teacher_headers(client)
+    exam_response = client.post("/exams", json=choice_exam_payload(), headers=headers)
+    assert exam_response.status_code == 200, exam_response.text
+    exam = exam_response.json()
+    submission = upload_submission(client, exam["id"], attempt_hints="Q1, Q3")
+
+    def fake_detector(**kwargs):
+        assert kwargs["question_ids_to_check"] == ["Q1", "Q3"]
+        return {
+            "student_name": "Asha",
+            "usn": "1BM22CS101",
+            "attempted_question_ids": [],
+            "uncertain_question_ids": [],
+            "evidence": [],
+            "summary": "No visible answers in teacher scope.",
+        }
+
+    def fake_evaluator(**kwargs):
+        raise AssertionError("grader should not run when detector found no attempted answers")
+
+    monkeypatch.setattr(main, "detect_attempted_questions_with_openai", fake_detector)
+    monkeypatch.setattr(main, "evaluate_submission_with_openai", fake_evaluator)
+    start = client.post(f"/submissions/{submission['id']}/evaluate", headers=headers)
+    assert start.status_code == 200, start.text
+
+    fetched = client.get(f"/submissions/{submission['id']}", headers=headers).json()
+    assert fetched["total_score"] == 0
+    assert fetched["total_marks"] == 0
+    assert not any(item["attempted"] for item in fetched["evaluations"])
+    assert "teacher did not include" in next(item for item in fetched["evaluations"] if item["question_id"] == "Q2")["reason"]
+    assert "detector did not find" in next(item for item in fetched["evaluations"] if item["question_id"] == "Q1")["reason"]
+
+
 def test_choice_exam_scores_best_attempted_questions_only(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch)
     headers = teacher_headers(client)
@@ -862,7 +1221,7 @@ def test_choice_exam_scores_best_attempted_questions_only(tmp_path, monkeypatch)
 
     counted = {item["question_id"] for item in fetched["evaluations"] if item["counts_toward_total"]}
     assert counted == {"Q1", "Q2", "Q3", "Q5"}
-    assert next(item for item in fetched["evaluations"] if item["question_id"] == "Q4")["attempted"] is True
+    assert next(item for item in fetched["evaluations"] if item["question_id"] == "Q4")["attempted"] is False
     assert next(item for item in fetched["evaluations"] if item["question_id"] == "Q4")["counts_toward_total"] is False
     assert next(item for item in fetched["evaluations"] if item["question_id"] == "Q8")["attempted"] is False
 

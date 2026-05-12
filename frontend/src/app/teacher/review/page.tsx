@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, RefreshCcw, ShieldCheck } from "lucide-react";
+import { Loader2, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   EmptyState,
@@ -107,26 +107,6 @@ export default function TeacherReviewPage() {
     }
   }
 
-  async function rerunEvaluation() {
-    if (!session || !activeSubmission) return;
-    setBusy("rerun");
-    setNotice("");
-    try {
-      await api<unknown>(`/submissions/${activeSubmission.id}/evaluate`, { method: "POST" }, session.token);
-      for (let attempt = 0; attempt < 120; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-        const fresh = await api<Submission>(`/submissions/${activeSubmission.id}`, undefined, session.token);
-        setSubmissions((current) => current.map((item) => (item.id === fresh.id ? fresh : item)));
-        if (fresh.status !== "running") break;
-      }
-      setNotice("Re-check complete. Review again before publishing.");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Could not rerun evaluation");
-    } finally {
-      setBusy("");
-    }
-  }
-
   async function downloadReport(submission: Submission) {
     if (!session) return;
     setBusy(`report-${submission.id}`);
@@ -219,10 +199,6 @@ export default function TeacherReviewPage() {
                     <span className={activeSubmission.published ? "status-pill status-good" : "status-pill status-info"}>
                       {activeSubmission.published ? "Published" : "Private"}
                     </span>
-                    <button className="btn-secondary" disabled={busy === "rerun"} onClick={rerunEvaluation} type="button">
-                      {busy === "rerun" ? <Loader2 className="animate-spin" size={16} /> : <RefreshCcw size={16} />}
-                      Re-check
-                    </button>
                     <button
                       className="btn-primary"
                       disabled={busy === "publish" || activeSubmission.status !== "completed"}

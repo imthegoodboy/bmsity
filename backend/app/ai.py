@@ -166,6 +166,47 @@ EVALUATION_SCHEMA: dict[str, Any] = {
 }
 
 
+ATTEMPT_DETECTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "student_name",
+        "usn",
+        "attempted_question_ids",
+        "uncertain_question_ids",
+        "evidence",
+        "summary",
+    ],
+    "properties": {
+        "student_name": {"type": "string"},
+        "usn": {"type": "string"},
+        "attempted_question_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "uncertain_question_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "evidence": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["question_id", "answer_locator", "confidence", "reason"],
+                "properties": {
+                    "question_id": {"type": "string"},
+                    "answer_locator": {"type": "string"},
+                    "confidence": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+            },
+        },
+        "summary": {"type": "string"},
+    },
+}
+
+
 def ensure_openai_ready() -> None:
     if not settings.openai_api_key:
         raise RuntimeError(
@@ -403,6 +444,91 @@ def verify_schema_with_openai(
         raise RuntimeError("OpenAI returned invalid JSON for the schema verification.") from exc
 
 
+def detect_attempted_questions_with_openai(
+    *,
+    exam: dict[str, Any],
+    student_name: str,
+    usn: str,
+    file_paths: list[Path],
+    question_ids_to_check: list[str] | None = None,
+) -> dict[str, Any]:
+    ensure_openai_ready()
+    client = OpenAI(api_key=settings.openai_api_key)
+
+    rubric_outline = {
+        "exam_title": exam["title"],
+        "subject": exam["subject"],
+        "total_marks": exam["total_marks"],
+        "max_questions_to_grade": exam.get("max_questions_to_grade"),
+        "choice_rules": exam.get("choice_rules", []),
+        "instructions": exam.get("instructions", ""),
+        "questions": exam["questions"],
+    }
+    scoped_question_ids = [question_id for question_id in (question_ids_to_check or []) if question_id.strip()]
+    scope_text = ", ".join(scoped_question_ids) if scoped_question_ids else "All rubric questions"
+    scope_instruction = (
+        "Only detect answers for these teacher-selected question or subpart IDs. A parent ID such "
+        "as Q1 authorizes that parent and its visible subparts. A subpart ID such as Q1.a authorizes "
+        "only that subpart. Do not return IDs outside this list. "
+        if scoped_question_ids
+        else "No teacher-selected scope was provided, so detect all visibly attempted rubric questions."
+    )
+
+    prompt = (
+        "Detect which rubric questions the student visibly attempted. Do not grade and do not award marks. "
+        "Read every answer-sheet page in order and locate explicit answer regions using written headings, "
+        "question numbers, subpart labels, nearby answer numbering, and unambiguous content. Question labels "
+        "may appear as 1a, 1(a), Q1.a, Q2(ii), Answer 3, 3b, roman numerals, or similar local formats. "
+        "Map each visible answer region to the closest rubric parent question or subpart ID. Return an ID "
+        "in attempted_question_ids only when there is visible student work for that exact question or subpart. "
+        "Put ambiguous but plausible mappings in uncertain_question_ids so the grader can review them carefully. "
+        "Do not mark a question attempted because the paper contains the question text, the teacher listed it, "
+        "there is a blank area, or another answer contains similar keywords. Do not reuse the same written answer "
+        "for multiple rubric questions. Use only answer evidence and the rubric outline; ignore student identity "
+        "signals except for matching the submitted sheet to the provided student details.\n\n"
+        f"Student name: {student_name}\nUSN: {usn}\n"
+        f"Questions authorized for detection: {scope_text}\n"
+        f"Scope rule: {scope_instruction}\n"
+        f"Rubric outline JSON:\n{json.dumps(rubric_outline, ensure_ascii=False)}"
+    )
+    content: list[dict[str, str]] = [{"type": "input_text", "text": prompt}]
+    content.extend(_content_for_paths(client, "Student answer sheet", file_paths))
+
+    try:
+        response = client.responses.create(
+            model=settings.openai_evaluation_model,
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the attempted-question detection agent. Be conservative, evidence-based, "
+                        "format-flexible, and unbiased. Detect attempted questions only; never grade."
+                    ),
+                },
+                {"role": "user", "content": content},
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "bmsitai_attempt_detection",
+                    "strict": True,
+                    "schema": ATTEMPT_DETECTION_SCHEMA,
+                }
+            },
+        )
+    except OpenAIError as exc:
+        raise RuntimeError(_openai_error_message(exc)) from exc
+
+    text = _extract_text(response)
+    if not text:
+        raise RuntimeError("OpenAI returned an empty attempted-question detection response.")
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("OpenAI returned invalid JSON for attempted-question detection.") from exc
+
+
 def evaluate_submission_with_openai(
     *,
     exam: dict[str, Any],
@@ -410,6 +536,7 @@ def evaluate_submission_with_openai(
     usn: str,
     file_paths: list[Path],
     attempt_hints: list[str] | None = None,
+    question_ids_to_check: list[str] | None = None,
 ) -> dict[str, Any]:
     ensure_openai_ready()
     client = OpenAI(api_key=settings.openai_api_key)
@@ -424,6 +551,17 @@ def evaluate_submission_with_openai(
         "questions": exam["questions"],
     }
     hints = [hint for hint in (attempt_hints or []) if hint.strip()]
+    scoped_question_ids = [question_id for question_id in (question_ids_to_check or []) if question_id.strip()]
+    scope_text = ", ".join(scoped_question_ids) if scoped_question_ids else "All rubric questions"
+    scope_instruction = (
+        "Teacher-selected questions or subparts to check are an authorization boundary. A parent "
+        "ID such as Q1 authorizes that parent and its visible subparts. A subpart ID such as Q1.a "
+        "authorizes only that subpart, not sibling subparts. For every rubric item outside this "
+        "list, return attempted false, score 0, and empty answer_text even if writing is visible. "
+        "For a selected item, still require a visible answer region before setting attempted true. "
+        if scoped_question_ids
+        else "No teacher-selected question scope was provided, so detect attempted questions from the answer sheet evidence."
+    )
 
     prompt = (
         "Evaluate this student's answer sheet against the teacher rubric. "
@@ -452,15 +590,24 @@ def evaluate_submission_with_openai(
         "If the exam has a choice rule like answer any 4 out of 8, still evaluate every question ID, "
         "but do not force unattempted questions into the student's score. The backend will apply "
         "the allowed-number rule to the attempted answers. "
-        "Teacher-provided attempted-question hints are optional search hints, not proof. Use them "
-        "to look harder for the listed answers, but if the answer is not visible, mark it unattempted "
-        "or review_required instead of inventing text. "
+        "Teacher-provided attempted-question hints define which questions to check when present. "
+        "They are still not proof that an answer is visible: use them to look harder for the listed "
+        "answers, but if the answer is not visible, mark it unattempted or review_required instead "
+        "of inventing text. "
         "Award partial marks based on conceptual correctness, diagram quality, completeness, "
         "required logic, length expectations, and teacher rules. Do not penalize different wording "
         "when the meaning is correct. Use confidence 0-100. Set review_required true when confidence "
-        "is below 80, handwriting/pages are unclear, or the answer is ambiguous.\n\n"
+        "is below 80, handwriting/pages are unclear, or the answer is ambiguous. Grade only the "
+        "answer evidence and rubric: do not use the student's name, USN, writing style, language "
+        "fluency, or any identity signal except where legibility affects confidence. "
+        "Use an internal observe-orient-decide-act-check loop: locate visible answer regions, map "
+        "them to the allowed question IDs, grade only supported answers, and then re-check that no "
+        "unanswered or unauthorized question received marks. Do not reveal that internal loop; put "
+        "only concise evidence and teacher-facing feedback in the JSON.\n\n"
         f"Student name: {student_name}\nUSN: {usn}\n"
         f"Attempt hints: {', '.join(hints) if hints else 'None'}\n"
+        f"Questions authorized for checking: {scope_text}\n"
+        f"Scope rule: {scope_instruction}\n"
         f"Rubric JSON:\n{json.dumps(rubric, ensure_ascii=False)}"
     )
 
@@ -475,7 +622,9 @@ def evaluate_submission_with_openai(
                     "role": "system",
                     "content": (
                         "You are a strict but fair exam evaluator. Follow the teacher rubric exactly. "
-                        "Prefer evidence from the answer sheet over assumptions."
+                        "Prefer evidence from the answer sheet over assumptions. Never grade outside "
+                        "the teacher-selected scope when one is provided. Keep scoring evidence-based "
+                        "and unbiased."
                     ),
                 },
                 {"role": "user", "content": content},
@@ -510,6 +659,7 @@ def verify_evaluation_with_openai(
     file_paths: list[Path],
     draft_result: dict[str, Any],
     attempt_hints: list[str] | None = None,
+    question_ids_to_check: list[str] | None = None,
 ) -> dict[str, Any]:
     ensure_openai_ready()
     client = OpenAI(api_key=settings.openai_api_key)
@@ -524,6 +674,17 @@ def verify_evaluation_with_openai(
         "questions": exam["questions"],
     }
     hints = [hint for hint in (attempt_hints or []) if hint.strip()]
+    scoped_question_ids = [question_id for question_id in (question_ids_to_check or []) if question_id.strip()]
+    scope_text = ", ".join(scoped_question_ids) if scoped_question_ids else "All rubric questions"
+    scope_instruction = (
+        "Teacher-selected questions or subparts to check are an authorization boundary. A parent "
+        "ID such as Q1 authorizes that parent and its visible subparts. A subpart ID such as Q1.a "
+        "authorizes only that subpart, not sibling subparts. Reject marks and answer_text for every "
+        "rubric item outside this list. For selected items, accept attempted true only when the "
+        "answer sheet visibly contains that exact answer region. "
+        if scoped_question_ids
+        else "No teacher-selected question scope was provided, so verify attempted status from answer sheet evidence."
+    )
     prompt = (
         "Verify the draft exam evaluation. You are the second-pass verifier, not the original grader. "
         "Return JSON only in the same evaluation schema. Re-read the uploaded answer sheet pages and "
@@ -533,12 +694,19 @@ def verify_evaluation_with_openai(
         "question. Prefer parent question IDs, but keep subpart IDs when the evidence is only clearly "
         "separated at subpart level. If a question or subpart is not visibly answered, set attempted false for that "
         "parent only when no part is answered and keep answer_text empty; otherwise keep attempted "
-        "true and award only the visible part credit. Do not force answers because of teacher hints; hints only guide search. "
+        "true and award only the visible part credit. Do not force answers because of teacher hints; "
+        "hints define the checking scope when present and guide search, but they are not proof of an answer. "
         "When uncertain, lower confidence and set review_required true instead of guessing. "
         "The backend will apply the final choice rule, so do not add unattempted questions into the "
-        "score just to reach the paper total.\n\n"
+        "score just to reach the paper total. Check only answer evidence against the rubric; do not "
+        "use the student's name, USN, writing style, language fluency, or any identity signal except "
+        "where legibility affects confidence. "
+        "Use an internal verify loop: check authorization scope, visible answer evidence, rubric match, "
+        "score bounds, and final attempted status for every returned item. Do not reveal that internal loop.\n\n"
         f"Student name: {student_name}\nUSN: {usn}\n"
         f"Attempt hints: {', '.join(hints) if hints else 'None'}\n"
+        f"Questions authorized for checking: {scope_text}\n"
+        f"Scope rule: {scope_instruction}\n"
         f"Rubric JSON:\n{json.dumps(rubric, ensure_ascii=False)}\n\n"
         f"Draft evaluation JSON:\n{json.dumps(draft_result, ensure_ascii=False)}"
     )
@@ -553,7 +721,9 @@ def verify_evaluation_with_openai(
                     "role": "system",
                     "content": (
                         "You are the verification agent for a teacher-facing grading system. "
-                        "Your job is to catch mistakes and preserve evidence-based grading."
+                        "Your job is to catch mistakes and preserve evidence-based grading. "
+                        "Never allow marks for unanswered or unauthorized questions. Keep verification "
+                        "evidence-based and unbiased."
                     ),
                 },
                 {"role": "user", "content": content},
